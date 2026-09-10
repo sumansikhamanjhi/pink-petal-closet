@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>lookbook</title></head><body>
+<script>
+const post = (u, b) => fetch(u, { method: "POST", body: b });
+const FILES = ["autumn_chic","summer_vibes","cozy_blush","evening_glam","casual","work","edgy","date","party"];
+(async function () {
+  const COLS = 3, W = 300, H = 520, PAD = 22;
+  const cv = document.createElement("canvas");
+  cv.width = COLS * W; cv.height = Math.ceil(FILES.length / COLS) * (H + PAD);
+  const c = cv.getContext("2d");
+  c.fillStyle = "#fff"; c.fillRect(0, 0, cv.width, cv.height);
+  for (let i = 0; i < FILES.length; i++) {
+    const img = new Image();
+    await new Promise(r => { img.onload = r; img.onerror = r; img.src = "../assets/mannequin_" + FILES[i] + ".jpg"; });
+    const col = i % COLS, row = Math.floor(i / COLS);
+    const x = col * W, y = row * (H + PAD) + PAD;
+    if (img.width) {
+      const s = Math.min(W / img.width, H / img.height);
+      c.drawImage(img, x + (W - img.width * s) / 2, y, img.width * s, img.height * s);
+    }
+    c.fillStyle = "#000"; c.font = "bold 17px monospace";
+    c.fillText((i + 1) + ". " + FILES[i], x + 6, y - 6);
+  }
+  await post("/save?name=lookbook.png", cv.toDataURL("image/png"));
+  await post("/report", JSON.stringify({ files: FILES }));
+})();
+</script>
+</body></html>

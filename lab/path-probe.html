@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>which extraction path</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}iframe{width:1200px;height:800px;border:0;opacity:.15}</style></head>
+<body><pre id="log">running…</pre><iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [], routes: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * WHICH CODE ACTUALLY RUNS when a garment is added.
+ *
+ * This probe exists because of a bug no amount of work on the repair itself
+ * would ever have fixed. The occlusion repair lives on the human-parsing path.
+ * extractGarment has two other paths, and neither has it — so a photograph of
+ * someone WEARING a garment that reached one of those came back with hair and
+ * hands cut out of it, and the repair was simply not in the code that ran.
+ *
+ * Two faults sent it there. The route was chosen by "did the user drag a box",
+ * which conflates where the garment is with what else is in the picture. And
+ * the box was handed to the cutout module in the wrong units and under the
+ * wrong field names — source pixels and `width`/`height` where fractions and
+ * `w`/`h` were expected — so every boxed extraction searched outside the
+ * picture and failed with "nothing found inside the region".
+ *
+ * So: three realistic routes onto a photo of a dressed person, all of which
+ * must reach the parsing path and come back repaired; and one flat-backdrop
+ * product shot, which must NOT, because the backdrop-flood path is the only
+ * thing that gets a white garment on a white sweep right.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 80; i++) {
+      if (read("typeof extractGarment === 'function' && typeof wardrobe !== 'undefined' && wardrobe.length")) break;
+      await wait(250);
+    }
+    check("the app exposes the isolation entry point",
+          read("typeof extractGarment === 'function'"));
+    check("the engine can be asked whether a photo has a person in it",
+          read("typeof GarmentEngine.detectPerson === 'function'"));
+
+    /* --- does the person probe actually discriminate? --- */
+    const worn = await read("GarmentEngine.detectPerson")("lab/testset/dress_long_1997.jpg");
+    const flat = await read("GarmentEngine.detectPerson")("assets/white_linen_blouse.jpg");
+    report.detect = { worn, flat };
+    check("a photo of someone wearing a dress reads as a person",
+          worn.person === true, JSON.stringify(worn));
+    check("a flat product shot does not",
+          flat.person === false, JSON.stringify(flat));
+
+    /* --- the three ways a worn photo gets added --- */
+    const photo = "lab/testset/dress_long_1997.jpg";
+    const runs = [
+      { name: "plain upload, no box", opts: { targetMode: "dress" } },
+      { name: "box dragged round the garment",
+        opts: { targetMode: "dress", cropBox: { x: 20, y: 120, width: 330, height: 780 } } },
+      { name: "garment tapped (box and point)",
+        opts: { targetMode: "dress", cropBox: { x: 20, y: 120, width: 330, height: 780 },
+                hintPoint: { x: 0.45, y: 0.55 } } }
+    ];
+    for (const r of runs) {
+      let res = null, err = null;
+      try { res = await read("extractGarment")(photo, r.opts); }
+      catch (e) { err = String(e && e.message || e); }
+      report.routes.push(res
+        ? { route: r.name, backend: res.backend, quality: res.quality,
+            occluded: res.occluded, warnings: res.warnings }
+        : { route: r.name, error: err });
+      if (res && res.image) {
+        await post("/save?name=route_" + r.name.replace(/\W+/g, "_") + ".png", res.image);
+      }
+      check("[" + r.name + "] the upload succeeds at all",
+            !!res, err || "ok");
+      check("[" + r.name + "] it goes to the path that repairs occlusion",
+            !!res && res.backend === "mediapipe", res ? res.backend : err);
+      check("[" + r.name + "] and fabric hidden by the arm was put back",
+            !!res && res.occluded > 0.01, res ? res.occluded : err);
+      flush();
+    }
+
+    /* --- and the path this must NOT have swallowed --- */
+    let product = null, perr = null;
+    try {
+      product = await read("extractGarment")("assets/white_linen_blouse.jpg",
+        { targetMode: "top", cropBox: { x: 80, y: 80, width: 864, height: 864 } });
+    } catch (e) { perr = String(e && e.message || e); }
+    report.productShot = product
+      ? { backend: product.backend, quality: product.quality }
+      : { error: perr };
+    if (product && product.image) await post("/save?name=route_product.png", product.image);
+    check("a white garment on a white sweep still takes the backdrop-flood path",
+          !!product && product.backend === "watershed",
+          product ? product.backend + " q" + product.quality : perr);
+    check("and comes out usable",
+          !!product && product.quality >= 70, product ? product.quality : perr);
+
+    /* --- the probe must be asked once per photograph, not once per fiddle --- */
+    const before = read("personProbeCache.size");
+    await read("extractGarment")(photo, { targetMode: "dress",
+      cropBox: { x: 20, y: 120, width: 330, height: 780 } });
+    const after = read("personProbeCache.size");
+    check("asking again about the same photo costs no extra model call",
+          after === before, before + " -> " + after + " cached photos");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

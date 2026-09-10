@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>AI fit wired into the app</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1340px;height:940px;border:0;background:#fff;opacity:0.22}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * The AI-fit wiring, WITHOUT spending anything.
+ *
+ * The image call itself is proven separately and costs money each time, so the
+ * probe stubs TryOnService.render and hands back a real ghost render already on
+ * disk. What that leaves under test is everything the app owns and could get
+ * wrong: which garments are offered a render at all, that the store survives a
+ * reload, that a stored render is what reaches the mannequin, that removing it
+ * falls back to the flat photo, and that shuffling never triggers a call.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    localStorage.removeItem("pp_worn_v2");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 100; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof generateWornCutout === 'function'")) break;
+      await wait(250);
+    }
+    check("the app and the worn-render module loaded",
+          !!win.WornRender && read("typeof generateWornCutout === 'function'"));
+
+    // --- what is offered a render, and what is sensibly refused
+    check("shoes and bags are not offered a ghost render",
+          !win.WornRender.CAN_RENDER.has("footwear") && !win.WornRender.CAN_RENDER.has("bags") &&
+          win.WornRender.CAN_RENDER.has("dresses") && win.WornRender.CAN_RENDER.has("jackets"));
+
+    const prompt = win.WornRender.buildPrompt("dresses", "Burgundy Cocktail Dress");
+    check("the prompt asks for a ghost mannequin and forbids redesigning",
+          /GHOST MANNEQUIN/.test(prompt) && /NO mannequin/.test(prompt) &&
+          /Do not redesign/.test(prompt) && /Burgundy Cocktail Dress/.test(prompt),
+          prompt.length + " chars");
+    await post("/save?name=aifit_prompt.txt", btoa(unescape(encodeURIComponent(prompt))));
+
+    // --- stub the paid call with a real render already on disk
+    let calls = 0;
+    const ghost = await fetch("generated/ghost_dress.png").then(r => r.blob())
+      .then(b => new Promise(res => { const f = new FileReader(); f.onload = () => res(f.result); f.readAsDataURL(b); }));
+    read("TryOnService").render = async (req) => {
+      calls++;
+      report.lastPrompt = (req && req.prompt || "").slice(0, 60);
+      return { image: ghost, cached: false };
+    };
+    // the lab server has no /api/tryon/status, so readiness is stubbed too —
+    // the real proxy path is proven separately and costs money each time
+    read("TryOnService").status = async () => ({ ready: true, via: "stub" });
+
+    /* THE STUB HAS TO MATCH THE GARMENT IT STANDS IN FOR.
+       ghost_dress.png is a real render of the burgundy cocktail dress, so the
+       garment asked for has to be that dress. It used to be "the first dress in
+       the wardrobe", which is the ivory floral one — harmless while nothing
+       compared the render with its original, and an outright failure now that
+       the app refuses a render whose colour or length has drifted. The gate was
+       right and the probe was lying. */
+    const dress = read("wardrobe").find(i => i.name === "Burgundy Cocktail Dress");
+    check("there is a dress to work with, and the stub is a render OF it",
+          !!dress, dress && dress.name);
+
+    // --- generate, store, and check what got stored
+    const out = await read("generateWornCutout")(dress);
+    check("one render made exactly one image call", calls === 1, calls);
+    check("the stored cutout extracted cleanly", out.quality >= 90, "quality " + out.quality);
+    check("the stored cutout is small enough to keep", out.kb < 200, out.kb + " KB");
+    check("it is a cutout, not the raw render",
+          out.image.indexOf("data:image/webp") === 0 || out.image.indexOf("data:image/png") === 0,
+          out.image.slice(0, 22));
+    report.storedKb = out.kb;
+
+    check("the render was compared with the wearer's own photo and matched",
+          out.fidelity && out.fidelity.ok === true,
+          out.fidelity ? "ΔE " + out.fidelity.colourShift + ", length drift " +
+                         out.fidelity.lengthDrift : "not compared");
+
+    /* --- A RENDER OF THE WRONG GARMENT MUST NOT BE STORED.
+       This is the failure that started it: a model handed back a dress in
+       another colour and another length, and the app kept it — which replaces
+       the wearer's own photograph in every outfit from then on. Simulated by
+       feeding the burgundy render back for the FLORAL dress, which is exactly
+       "the colour and the length changed". */
+    const floral = read("wardrobe").find(i => i.name === "Floral Summer Dress");
+    let refused = null;
+    try {
+      await read("generateWornCutout")(floral);
+      refused = "accepted it";
+    } catch (e) { refused = String(e && e.message || e); }
+    check("a render that came back a different garment is refused",
+          /changed the garment/.test(refused), refused.slice(0, 120));
+    check("and nothing was stored against that garment",
+          !read("wornCutoutFor")(floral.id),
+          read("wornCutoutFor")(floral.id) ? "STORED" : "clean");
+    check("so the mannequin still shows the wearer's own photo",
+          (await read("getItemCutout")({ item: floral, cat: floral.category, mode: "dress" })) !== ghost);
+
+    // --- the mannequin must now use it
+    const cutoutUsed = await read("getItemCutout")({ item: dress, cat: dress.category, mode: "dress" });
+    check("the mannequin gets the worn cutout, not the flat photo",
+          cutoutUsed === out.image, cutoutUsed === out.image ? "same" : "differs");
+
+    // --- and it must be free from here on
+    const before = calls;
+    await read("getItemCutout")({ item: dress, cat: dress.category, mode: "dress" });
+    await read("getItemCutout")({ item: dress, cat: dress.category, mode: "dress" });
+    check("re-using it costs no further calls", calls === before, calls - before + " extra");
+
+    // --- a shuffle must never generate
+    const activeOutfit = read("activeOutfit");
+    for (const c of Object.keys(activeOutfit.slots)) { activeOutfit.slots[c].itemId = null; activeOutfit.slots[c].enabled = false; }
+    activeOutfit.slots.dresses.itemId = dress.id; activeOutfit.slots.dresses.enabled = true;
+    read("shuffleOutfit")();
+    await wait(600);
+    read("generateOutfit")("cocktail party");
+    await wait(600);
+    check("generating and shuffling outfits costs nothing", calls === before, calls - before + " extra");
+
+    // --- it survives a reload, because that is the point of storing it
+    const persisted = JSON.parse(localStorage.getItem("pp_worn_v2") || "{}");
+    check("the render is persisted against the garment id",
+          !!(persisted[dress.id] && persisted[dress.id].image), Object.keys(persisted).join(","));
+    check("it is stamped with the prompt version, so a reworded prompt invalidates it",
+          persisted[dress.id].version === win.WornRender.PROMPT_VERSION,
+          persisted[dress.id].version);
+
+    // --- removing it goes back to the user's own photograph
+    read("forgetWornCutout")(dress.id);
+    const backToFlat = await read("getItemCutout")({ item: dress, cat: dress.category, mode: "dress" });
+    check("removing the AI fit falls back to the flat photo", backToFlat !== out.image);
+
+    /* --- worthIt has to discriminate, in BOTH directions.
+       A recommender that says yes to everything is a recommender that sells
+       renders, so it is checked against a garment known to be a clean product
+       shot (the burgundy dress extracts at quality 100) and one known to be a
+       hard white-on-white case (the floral dress, 77-81). */
+    const verdicts = {};
+    for (const name of ["Burgundy Cocktail Dress", "Floral Summer Dress"]) {
+      const it = read("wardrobe").find(i => i.name === name);
+      if (!it) continue;
+      const cut = await win.GarmentCutout.extract(it.image, { category: it.category });
+      const fitted = win.GarmentFit.fit(cut, it.category, { frameWidth: 512, frameHeight: 917 });
+      const v = win.WornRender.worthIt(cut, fitted);
+      verdicts[name] = { worth: v.worth, why: v.why, effort: v.effort, quality: cut.metrics.quality };
+    }
+    report.verdicts = verdicts;
+    const clean = verdicts["Burgundy Cocktail Dress"];
+    const hard = verdicts["Floral Summer Dress"];
+    check("a clean product shot is NOT recommended for a paid render",
+          clean && clean.worth === false, clean ? clean.why + " (q" + clean.quality + ")" : "missing");
+    check("a garment that extracts badly IS recommended",
+          hard && hard.worth === true, hard ? hard.why + " (q" + hard.quality + ")" : "missing");
+
+    /* --- a garment that was largely hidden must be recommended, and for THAT
+       reason. The extraction paints the missing fabric back from the weave
+       around it, which gets the shape right and the pattern wrong, so it is
+       the strongest case there is for spending a call — and it has to outrank
+       the other reasons rather than merely be one of them, or a garment that
+       also happens to be a clean product shot gets declined. The fact is
+       carried on the item, because the repair is seamless and re-extracting
+       the stored cutout cannot rediscover it. */
+    {
+      const it = read("wardrobe").find(i => i.name === "Burgundy Cocktail Dress");
+      const cut = await win.GarmentCutout.extract(it.image, { category: it.category });
+      const fitted = win.GarmentFit.fit(cut, it.category, { frameWidth: 512, frameHeight: 917 });
+      const before = win.WornRender.worthIt(cut, fitted);
+      cut.metrics.occluded = 0.06;
+      const after = win.WornRender.worthIt(cut, fitted);
+      report.occlusionVerdict = { before: before.why, after: after.why };
+      check("the same clean shot IS recommended once 6% of it turns out to be painted",
+            before.worth === false && after.worth === true, after.why);
+      check("and the reason given is the hidden fabric, not the fit",
+            /hid 6%/.test(after.why), after.why);
+
+      cut.metrics.occluded = 0.01;
+      check("a sliver of repair is not enough to sell a render",
+            win.WornRender.worthIt(cut, fitted).worth === false,
+            win.WornRender.worthIt(cut, fitted).why);
+    }
+
+    // the app has to hand that stored fact back, or the recommendation above
+    // can never fire in the real thing
+    check("aiFitWholeCloset reads the item's own occluded field",
+          /item\.occluded/.test(read("aiFitWholeCloset").toString()),
+          read("aiFitWholeCloset").toString().indexOf("item.occluded") >= 0 ? "present" : "MISSING");
+
+    // --- a render on the mannequin, for the record
+    read("forgetWornCutout")(dress.id);
+    await read("generateWornCutout")(dress);
+    const shoes = read("wardrobe").find(i => i.category === "footwear" && i.image);
+    if (shoes) { activeOutfit.slots.footwear.itemId = shoes.id; activeOutfit.slots.footwear.enabled = true; }
+    const ok = await read("renderOutfitDisplay")();
+    await wait(500);
+    check("the mannequin renders wearing the AI-fitted garment", ok === true, String(ok));
+    const shot = win.document.getElementById("mannequin-render").src;
+    if (shot && shot.indexOf("data:") === 0) await post("/save?name=aifit_mannequin.png", shot);
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

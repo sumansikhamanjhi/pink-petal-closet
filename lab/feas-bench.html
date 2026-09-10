@@ -1,0 +1,187 @@
+<!doctype html><meta charset="utf-8"><title>feas bench</title><body><pre id="log"></pre><script>
+const L=[]; const say=s=>{L.push(s);document.getElementById('log').textContent=L.join('\n');};
+
+function tex(w,h,alpha){const c=document.createElement('canvas');c.width=w;c.height=h;
+ const x=c.getContext('2d');const d=x.createImageData(w,h);
+ for(let j=0;j<h;j++)for(let i=0;i<w;i++){const p=(j*w+i)*4;
+   const k=((i>>4)+(j>>4))&1; d.data[p]=k?230:40; d.data[p+1]=k?90:180; d.data[p+2]=60; d.data[p+3]=alpha;}
+ x.putImageData(d,0,0);return c;}
+
+function drawTri(ctx,pat,src,dst,pad){
+ const au=src[0],av=src[1],bu=src[2],bv=src[3],cu=src[4],cv=src[5];
+ const ax=dst[0],ay=dst[1],bx=dst[2],by=dst[3],cx=dst[4],cy=dst[5];
+ const sbx=bu-au,sby=bv-av,scx=cu-au,scy=cv-av;
+ const den=sbx*scy-sby*scx; if(Math.abs(den)<1e-6)return 0;
+ const dbx=bx-ax,dby=by-ay,dcx=cx-ax,dcy=cy-ay;
+ const m11=(dbx*scy-dcx*sby)/den,m12=(dcx*sbx-dbx*scx)/den;
+ const m21=(dby*scy-dcy*sby)/den,m22=(dcy*sbx-dby*scx)/den;
+ const dx=ax-m11*au-m12*av, dy=ay-m21*au-m22*av;
+ let p=[ax,ay,bx,by,cx,cy];
+ if(pad>0){const gx=(ax+bx+cx)/3,gy=(ay+by+cy)/3;p=[];
+  const pts=[[ax,ay],[bx,by],[cx,cy]];
+  for(let q=0;q<3;q++){const vx=pts[q][0]-gx,vy=pts[q][1]-gy;const l=Math.hypot(vx,vy)||1;
+   p.push(pts[q][0]+vx/l*pad,pts[q][1]+vy/l*pad);}}
+ pat.setTransform(new DOMMatrix([m11,m21,m12,m22,dx,dy]));
+ ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.lineTo(p[4],p[5]);ctx.closePath();ctx.fill();
+ return 1;}
+
+function drawTriClip(ctx,texc,src,dst,pad){
+ const au=src[0],av=src[1],bu=src[2],bv=src[3],cu=src[4],cv=src[5];
+ const ax=dst[0],ay=dst[1],bx=dst[2],by=dst[3],cx=dst[4],cy=dst[5];
+ const sbx=bu-au,sby=bv-av,scx=cu-au,scy=cv-av;
+ const den=sbx*scy-sby*scx; if(Math.abs(den)<1e-6)return 0;
+ const dbx=bx-ax,dby=by-ay,dcx=cx-ax,dcy=cy-ay;
+ const m11=(dbx*scy-dcx*sby)/den,m12=(dcx*sbx-dbx*scx)/den;
+ const m21=(dby*scy-dcy*sby)/den,m22=(dcy*sbx-dby*scx)/den;
+ const dx=ax-m11*au-m12*av, dy=ay-m21*au-m22*av;
+ let p=[ax,ay,bx,by,cx,cy];
+ if(pad>0){const gx=(ax+bx+cx)/3,gy=(ay+by+cy)/3;p=[];
+  const pts=[[ax,ay],[bx,by],[cx,cy]];
+  for(let q=0;q<3;q++){const vx=pts[q][0]-gx,vy=pts[q][1]-gy;const l=Math.hypot(vx,vy)||1;
+   p.push(pts[q][0]+vx/l*pad,pts[q][1]+vy/l*pad);}}
+ ctx.save();ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.lineTo(p[4],p[5]);ctx.closePath();ctx.clip();
+ ctx.setTransform(m11,m21,m12,m22,dx,dy);ctx.drawImage(texc,0,0);ctx.restore();
+ return 1;}
+
+function grid(W,H,cols,rows,warp){
+ const src=[],dst=[];
+ for(let j=0;j<=rows;j++)for(let i=0;i<=cols;i++){
+  const u=i/cols*W,v=j/rows*H; src.push(u,v);
+  if(!warp){dst.push(u,v);} else {
+   const nx=(u/W-.5)*2, ny=(v/H-.5)*2, r=Math.hypot(nx,ny);
+   const k=1+0.18*r*r; dst.push((nx*k*.5+.5)*W,(ny*k*.5+.5)*H);} }
+ const tris=[];
+ for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){
+  const a=j*(cols+1)+i,b=a+1,c=a+cols+1,d=c+1;
+  const d1=Math.pow(dst[a*2]-dst[d*2],2)+Math.pow(dst[a*2+1]-dst[d*2+1],2);
+  const d2=Math.pow(dst[b*2]-dst[c*2],2)+Math.pow(dst[b*2+1]-dst[c*2+1],2);
+  if(d1<=d2){tris.push(a,b,d,a,d,c);}else{tris.push(a,b,c,b,d,c);} }
+ return {src:src,dst:dst,tris:tris};}
+
+function renderMesh(ctx,texc,m,pad,mode){
+ const pat=mode==='pattern'?ctx.createPattern(texc,'no-repeat'):null;
+ if(pat)ctx.fillStyle=pat;
+ let n=0;
+ for(let t=0;t<m.tris.length;t+=3){
+  const i0=m.tris[t]*2,i1=m.tris[t+1]*2,i2=m.tris[t+2]*2;
+  const s=[m.src[i0],m.src[i0+1],m.src[i1],m.src[i1+1],m.src[i2],m.src[i2+1]];
+  const d=[m.dst[i0],m.dst[i0+1],m.dst[i1],m.dst[i1+1],m.dst[i2],m.dst[i2+1]];
+  n+= mode==='pattern'?drawTri(ctx,pat,s,d,pad):drawTriClip(ctx,texc,s,d,pad);}
+ return n;}
+
+function U(r2){return r2<1e-12?0:r2*0.5*Math.log(r2);}
+function solve(A,b,n){
+ for(let c=0;c<n;c++){let piv=c;for(let r=c+1;r<n;r++)if(Math.abs(A[r*n+c])>Math.abs(A[piv*n+c]))piv=r;
+  if(piv!==c){for(let k=0;k<n;k++){const t=A[c*n+k];A[c*n+k]=A[piv*n+k];A[piv*n+k]=t;}const t=b[c];b[c]=b[piv];b[piv]=t;}
+  const d=A[c*n+c]; if(Math.abs(d)<1e-14)continue;
+  for(let r=c+1;r<n;r++){const f=A[r*n+c]/d;if(!f)continue;
+   for(let k=c;k<n;k++)A[r*n+k]-=f*A[c*n+k];b[r]-=f*b[c];}}
+ const x=new Float64Array(n);
+ for(let r=n-1;r>=0;r--){let s=b[r];for(let k=r+1;k<n;k++)s-=A[r*n+k]*x[k];x[r]=s/A[r*n+r];}
+ return x;}
+function tpsFit(P,Q,lam){
+ const n=P.length,N=n+3;const A=new Float64Array(N*N);
+ for(let i=0;i<n;i++){for(let j=0;j<n;j++){const dx=P[i][0]-P[j][0],dy=P[i][1]-P[j][1];
+   A[i*N+j]= i===j?lam:U(dx*dx+dy*dy);}
+  A[i*N+n]=1;A[i*N+n+1]=P[i][0];A[i*N+n+2]=P[i][1];
+  A[n*N+i]=1;A[(n+1)*N+i]=P[i][0];A[(n+2)*N+i]=P[i][1];}
+ const bx=new Float64Array(N),by=new Float64Array(N);
+ for(let i=0;i<n;i++){bx[i]=Q[i][0];by[i]=Q[i][1];}
+ const cx=solve(A.slice(),bx.slice(),N),cy=solve(A.slice(),by.slice(),N);
+ return {P:P,cx:cx,cy:cy,n:n};}
+function tpsEval(t,x,y){let fx=t.cx[t.n]+t.cx[t.n+1]*x+t.cx[t.n+2]*y;
+ let fy=t.cy[t.n]+t.cy[t.n+1]*x+t.cy[t.n+2]*y;
+ for(let i=0;i<t.n;i++){const dx=x-t.P[i][0],dy=y-t.P[i][1];const u=U(dx*dx+dy*dy);fx+=t.cx[i]*u;fy+=t.cy[i]*u;}
+ return [fx,fy];}
+
+(async function(){
+ try{
+ say('pattern.setTransform supported: '+('setTransform' in CanvasPattern.prototype));
+ const W=768,H=1376;
+ const t255=tex(512,512,255), t128=tex(512,512,128);
+ const out=document.createElement('canvas');out.width=W;out.height=H;
+ const ctx=out.getContext('2d',{willReadFrequently:true});
+
+ {const c1=document.createElement('canvas');c1.width=512;c1.height=512;
+  const x1=c1.getContext('2d',{willReadFrequently:true});x1.drawImage(t255,0,0);
+  const c2=document.createElement('canvas');c2.width=512;c2.height=512;
+  const x2=c2.getContext('2d',{willReadFrequently:true});
+  renderMesh(x2,t255,grid(512,512,8,8,false),0,'pattern');
+  const a=x1.getImageData(0,0,512,512).data,b=x2.getImageData(0,0,512,512).data;
+  let worst=0,bad=0;
+  for(let j=2;j<510;j++)for(let i=2;i<510;i++){const p=(j*512+i)*4;
+   for(let k=0;k<4;k++){const d=Math.abs(a[p+k]-b[p+k]);if(d>worst)worst=d;if(d>2)bad++;}}
+  say('IDENTITY: worst channel delta='+worst+', channels>2 = '+bad);}
+
+ say('');say('TRIANGLE TIMING (768x1376 dest, software raster):');
+ say('  tris | pattern ms | clip ms | us/tri(pat)');
+ const sizes=[[4,6],[8,12],[16,24],[24,40],[32,48],[40,60]];
+ for(let z=0;z<sizes.length;z++){
+  const m=grid(W,H,sizes[z][0],sizes[z][1],true); const nt=m.tris.length/3;
+  let tp=0,tc=0;
+  for(let rep=0;rep<3;rep++){
+   ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
+   let s=performance.now();renderMesh(ctx,t255,m,1.5,'pattern');tp+=performance.now()-s;
+   ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
+   s=performance.now();renderMesh(ctx,t255,m,1.5,'clip');tc+=performance.now()-s;}
+  say('  '+String(nt).padStart(5)+' | '+(tp/3).toFixed(1).padStart(10)+' | '+(tc/3).toFixed(1).padStart(7)+' | '+((tp/3)*1000/nt).toFixed(1));}
+
+ say('');say('SEAM (opaque src, % interior px with alpha<250):');
+ const pads=[0,0.5,1.0,1.5,2.5];
+ for(let z=0;z<pads.length;z++){const pad=pads[z];
+  const m=grid(W,H,24,40,true);
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);
+  renderMesh(ctx,t255,m,pad,'pattern');
+  const d=ctx.getImageData(0,0,W,H).data;let interior=0,bad=0,minA=255;
+  for(let j=4;j<H-4;j++)for(let i=4;i<W-4;i++){const p=(j*W+i)*4;
+   if(d[p+3]===0)continue;
+   if(d[((j-3)*W+i)*4+3]>250&&d[((j+3)*W+i)*4+3]>250&&d[(j*W+i-3)*4+3]>250&&d[(j*W+i+3)*4+3]>250){
+    interior++;if(d[p+3]<250){bad++;if(d[p+3]<minA)minA=d[p+3];}}}
+  say('  pad '+pad+': '+(100*bad/interior).toFixed(3)+'% (min alpha '+(bad?minA:'-')+')');}
+
+ say('');say('ALPHA (uniform 50% alpha source, target 128):');
+ {const m=grid(W,H,24,40,true);
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);renderMesh(ctx,t128,m,1.5,'pattern');
+  let d=ctx.getImageData(0,0,W,H).data;let lo=255,hi=0,wrong=0,tot=0;
+  for(let j=40;j<H-40;j++)for(let i=40;i<W-40;i++){const p=(j*W+i)*4;if(d[p+3]===0)continue;
+   if(d[((j-4)*W+i)*4+3]&&d[((j+4)*W+i)*4+3]&&d[(j*W+i-4)*4+3]&&d[(j*W+i+4)*4+3]){
+    tot++;const a=d[p+3];if(a<lo)lo=a;if(a>hi)hi=a;if(a<120||a>136)wrong++;}}
+  say('  direct RGBA : ['+lo+'..'+hi+'] '+(100*wrong/tot).toFixed(1)+'% outside [120,136]');
+  const cov=document.createElement('canvas');cov.width=512;cov.height=512;
+  const cx2=cov.getContext('2d',{willReadFrequently:true});
+  const sd=t128.getContext('2d',{willReadFrequently:true}).getImageData(0,0,512,512);
+  const cd=cx2.createImageData(512,512);
+  for(let p=0;p<512*512;p++){const a=sd.data[p*4+3];cd.data[p*4]=a;cd.data[p*4+1]=a;cd.data[p*4+2]=a;cd.data[p*4+3]=255;}
+  cx2.putImageData(cd,0,0);
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,W,H);renderMesh(ctx,cov,m,1.5,'pattern');
+  d=ctx.getImageData(0,0,W,H).data;lo=255;hi=0;wrong=0;tot=0;
+  for(let j=40;j<H-40;j++)for(let i=40;i<W-40;i++){const p=(j*W+i)*4;if(d[p+3]===0)continue;
+   if(d[((j-4)*W+i)*4+3]&&d[((j+4)*W+i)*4+3]&&d[(j*W+i-4)*4+3]&&d[(j*W+i+4)*4+3]){
+    tot++;const a=(d[p]*d[p+3]/255)|0;if(a<lo)lo=a;if(a>hi)hi=a;if(a<120||a>136)wrong++;}}
+  say('  split-chan  : ['+lo+'..'+hi+'] '+(100*wrong/tot).toFixed(1)+'% outside [120,136]');}
+
+ say('');say('TPS (Gaussian elimination, PIXEL coords, lambda=0.01):');
+ const ns=[40,60,80,120];
+ for(let z=0;z<ns.length;z++){const n=ns[z];
+  const P=[],Q=[];
+  for(let i=0;i<n;i++){const x=Math.random()*800,y=Math.random()*1000;P.push([x,y]);Q.push([x*1.1+20,y*0.9+30]);}
+  let s=performance.now();const f=tpsFit(P,Q,0.01);const tfit=performance.now()-s;
+  s=performance.now();for(let i=0;i<1500;i++)tpsEval(f,Math.random()*800,Math.random()*1000);
+  const tev=performance.now()-s;
+  let maxerr=0;for(let i=0;i<n;i++){const e=tpsEval(f,P[i][0],P[i][1]);
+   maxerr=Math.max(maxerr,Math.abs(e[0]-Q[i][0]),Math.abs(e[1]-Q[i][1]));}
+  say('  n='+n+': fit '+tfit.toFixed(1)+'ms, 1500 evals '+tev.toFixed(1)+'ms, interp err '+maxerr.toExponential(1));}
+ {const dx=300,dy=400;
+  say('  typical K entry U(r2) at pixel scale = '+U(dx*dx+dy*dy).toExponential(2)+'  <-- lambda 0.01 is ~1e-9 of this');
+  say('  same pair in NORMALISED coords       = '+U(0.3*0.3+0.4*0.4).toExponential(2)+'  <-- lambda 0.01 is comparable');}
+
+ {let s=performance.now();const d=ctx.getImageData(0,0,W,H);let acc=0;
+  for(let p=0;p<W*H;p++)acc+=d.data[p*4+3];ctx.putImageData(d,0,0);
+  say('');say('Full-canvas getImageData+scan+put (1.06Mpx): '+(performance.now()-s).toFixed(1)+'ms (acc '+acc+')');}
+
+ await new Promise(function(r){const s=performance.now();out.toBlob(function(b){say('PNG encode 768x1376: '+(performance.now()-s).toFixed(1)+'ms, '+(b?(b.size/1024).toFixed(0)+'KB':'null'));r();},'image/png');});
+ await new Promise(function(r){const s=performance.now();out.toBlob(function(b){say('WebP q0.92 768x1376: '+(performance.now()-s).toFixed(1)+'ms, '+(b?(b.size/1024).toFixed(0)+'KB':'unsupported'));r();},'image/webp',0.92);});
+ }catch(e){say('ERROR '+e.message+'\n'+e.stack);}
+ fetch('/report',{method:'POST',body:JSON.stringify({log:L.join('\n')})});
+})();
+</script></body>

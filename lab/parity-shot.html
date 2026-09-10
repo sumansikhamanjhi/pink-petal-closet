@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>parity screenshots</title></head>
+<body><pre id="log">…</pre><iframe id="app" style="width:1460px;height:1040px;border:0;background:#fff"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+/* Screenshots of the changed surfaces, for looking at rather than asserting:
+   the Add page without its redundant button, the stylist with the auto box
+   gone, My Looks with something in it, and the phone's own Looks tab. */
+(async function () {
+  const frame = document.getElementById("app");
+  frame.src = "../index.html";
+  await new Promise(r => { frame.onload = r; });
+  const win = frame.contentWindow, doc = win.document;
+  const read = e => win.eval(e);
+  for (let i = 0; i < 120; i++) {
+    if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof saveOutfit === 'function'")) break;
+    await wait(250);
+  }
+  for (let i = 0; i < 80; i++) {
+    if (read("currentMannequinPhoto")) break;
+    await wait(250);
+  }
+  await read("saveOutfit")();
+  read("generateOutfit")("office meeting");
+  await wait(2500);
+  await read("saveOutfit")();
+  await wait(500);
+
+  const out = {};
+  for (const tab of ["assistant", "looks", "add", "closet"]) {
+    read("switchTab")(tab);
+    await wait(900);
+    out[tab] = true;
+    await post("/save?name=parity_" + tab + ".txt",
+      btoa(unescape(encodeURIComponent(doc.querySelector(".app-container").innerText.slice(0, 2600)))));
+  }
+  document.getElementById("log").textContent = "captured " + Object.keys(out).join(", ");
+  await post("/report", JSON.stringify({ ok: true, tabs: Object.keys(out) }, null, 1));
+})();
+</script></body></html>

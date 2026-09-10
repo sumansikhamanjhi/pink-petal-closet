@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Occlusion repair: A/B</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}
+.row{display:flex;gap:6px;align-items:flex-start;margin:10px 0}
+.row div{width:150px}canvas{background:#8a8a8a;max-height:300px}</style></head>
+<body><pre id="log">running…</pre><div id="shelf"></div>
+<script src="../garment-engine.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [], cases: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * Does putting back the hidden fabric actually work, and does it cost
+ * anything anywhere else?
+ *
+ * Every photograph is extracted twice — with the repair and without — so the
+ * comparison is between two runs of the same code on the same pixels rather
+ * than against numbers written down earlier. Three things are measured:
+ *
+ *   bite     how much garment is still missing from inside its own outline
+ *            with an occluder standing in it. This is the defect, and the
+ *            repair has to shrink it.
+ *   colour   how far the painted fabric's mean sits from the garment's own.
+ *            A repair of the right shape in the wrong colour is not a repair;
+ *            a black dress was at one point being filled in mauve.
+ *   quality  the engine's own score, which must not fall. It counts painted
+ *            area against itself on purpose, so a repair that runs away and
+ *            invents half a garment shows up here.
+ */
+const CASES = [
+  { src: "testset/casual_tshirt_jeans.jpg", mode: "top" },
+  { src: "testset/dress_dark_runway.jpg", mode: "dress" },
+  { src: "testset/dress_long_1997.jpg", mode: "dress" },
+  { src: "testset/dress_red_runway.jpg", mode: "dress" },
+  { src: "testset/dress_white_outdoor.jpg", mode: "dress" },
+  { src: "testset/mannequin_dress.jpg", mode: "dress" },
+  { src: "testset/mannequin_top_skirt.jpg", mode: "top" }
+];
+
+const M = () => window.GarmentEngine._internals;
+
+/** Garment still missing from inside its own closed outline, with hair or a
+    limb standing in the gap. The same ruler for both runs. */
+function biteShare(d) {
+  const { w, h, sem, alpha } = d;
+  const mask = new Uint8Array(w * h);
+  let area = 0, minx = w, maxx = -1;
+  for (let p = 0; p < w * h; p++) if (alpha[p] > 0.5) { mask[p] = 1; area++; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (mask[y * w + x]) { if (x < minx) minx = x; if (x > maxx) maxx = x; }
+  }
+  if (maxx < minx) return { area: 0, bite: 0, share: 0 };
+  const r = Math.max(4, Math.min(40, Math.round((maxx - minx + 1) * 0.09)));
+  const closed = M().closeOp(mask, w, h, r);
+  let bite = 0;
+  for (let p = 0; p < w * h; p++) {
+    if (mask[p] || !closed[p]) continue;
+    if (sem.hair[p] > 0.5 || sem.skin[p] > 0.5 || sem.face[p] > 0.5) bite++;
+  }
+  return { area, bite, share: +(bite / Math.max(1, area)).toFixed(4) };
+}
+
+/**
+ * Did the repair fill the garment's own neck opening?
+ *
+ * The one failure that would be worse than leaving a bite: a V-neck painted
+ * solid comes back as a boat neck, and the wearer's garment has been redesigned
+ * without being asked.
+ *
+ * Two rulers were tried and thrown away before this one, both of them
+ * semantic. The first called a widened face box "the neck" — on a 300px dress
+ * that was half the picture, and it flagged a hair bite on a shoulder. The
+ * second flooded outward from the face through skin to find the neck properly,
+ * and in a photograph where the model rests her hand on her chin the flood ran
+ * straight down her forearm and flagged the same shoulder again. Worse, both
+ * were asking almost the same question the code under test asks, so agreement
+ * between them would have proved nothing.
+ *
+ * This one measures the DAMAGE instead, and needs no semantics at all. Filling
+ * a neckline pulls the garment's top edge upward towards the chin — that is
+ * precisely what the boat-neck failure looks like. Filling a bite does not: a
+ * bite is a hole below an edge that already exists, so the edge stays put. So
+ * the topmost row of garment is compared between the two runs, column by
+ * column, across the middle of the garment where a neckline lives. An
+ * independent measurement of the actual harm, on the same pixels.
+ */
+function topEdgeRise(off, on) {
+  const w = off.w, h = off.h;
+  const topRow = (d, x) => {
+    for (let y = 0; y < h; y++) if (d.alpha[y * w + x] > 0.5) return y;
+    return -1;
+  };
+  let minx = w, maxx = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (off.alpha[y * w + x] > 0.5) { if (x < minx) minx = x; if (x > maxx) maxx = x; }
+  }
+  if (maxx < minx) return { maxRise: 0, columnsRisen: 0, band: "no garment" };
+  const gw = maxx - minx + 1;
+  const lo = Math.round(minx + gw * 0.30), hi = Math.round(minx + gw * 0.70);
+  let maxRise = 0, columnsRisen = 0;
+  for (let x = lo; x <= hi; x++) {
+    const a = topRow(off, x), b = topRow(on, x);
+    if (a < 0 || b < 0) continue;
+    const rise = a - b;                       // positive: the edge moved up
+    if (rise > maxRise) maxRise = rise;
+    if (rise > 4) columnsRisen++;
+  }
+  return { maxRise, columnsRisen, band: lo + ".." + hi };
+}
+
+function meanOf(d, pick) {
+  let n = 0, r = 0, g = 0, b = 0;
+  for (let p = 0; p < d.w * d.h; p++) {
+    if (!pick(p)) continue;
+    n++; r += d.rgb[p * 3]; g += d.rgb[p * 3 + 1]; b += d.rgb[p * 3 + 2];
+  }
+  return n ? { n, m: [r / n, g / n, b / n] } : null;
+}
+
+/**
+ * How far the paint sits from the fabric it is continuing, summed over the
+ * three channels, measured against untouched garment well away from any
+ * repair.
+ *
+ * `which` picks the repair to judge. It matters: the engine has older repair
+ * passes for straps and enclosed holes, and their paint is not this change's
+ * to answer for. Measuring `patch` mixes the two and the number stops meaning
+ * anything; measuring `bitePatch` asks only about the fabric put back behind
+ * hair and limbs.
+ */
+function colourGap(d, which) {
+  const region = which === "bite" ? d.bitePatch : d.patch;
+  if (!region) return null;
+  const near = M().dilate(d.patch, d.w, d.h, 3);
+  const paint = meanOf(d, p => region[p]);
+  const fabric = meanOf(d, p => d.alpha[p] > 0.9 && !near[p]);
+  if (!paint || !fabric) return null;
+  return Math.round(Math.abs(paint.m[0] - fabric.m[0]) +
+                    Math.abs(paint.m[1] - fabric.m[1]) +
+                    Math.abs(paint.m[2] - fabric.m[2]));
+}
+
+async function shot(name, dataUrl) {
+  const im = await new Promise((ok, no) => {
+    const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = dataUrl;
+  });
+  const cv = document.createElement("canvas");
+  cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+  const c = cv.getContext("2d");
+  c.fillStyle = "#8a8a8a"; c.fillRect(0, 0, cv.width, cv.height);
+  c.drawImage(im, 0, 0);
+  await post("/save?name=" + name, cv.toDataURL("image/png"));
+  return cv;
+}
+
+(async function () {
+  try {
+    await window.GarmentEngine.warmup();
+    report.backend = window.GarmentEngine.status();
+    check("the human-parsing model is the one under test",
+          report.backend.backend === "mediapipe", report.backend.backend);
+
+    let improved = 0, worseQuality = 0, badColour = [];
+    for (const c of CASES) {
+      const common = { mode: c.mode, background: "transparent", padding: 0,
+                       outputMaxDim: 720, debug: true };
+      const off = await window.GarmentEngine.extract(c.src,
+        Object.assign({ fillOccluded: false }, common));
+      const on = await window.GarmentEngine.extract(c.src, common);
+
+      const bOff = biteShare(off._debug), bOn = biteShare(on._debug);
+      const gap = colourGap(on._debug, "bite");
+      const entry = {
+        src: c.src,
+        biteBefore: bOff.share, biteAfter: bOn.share,
+        bitePixelsBefore: bOff.bite, bitePixelsAfter: bOn.bite,
+        qualityBefore: off.metrics.quality, qualityAfter: on.metrics.quality,
+        occluded: on.metrics.occluded, colourGap: gap,
+        topEdge: topEdgeRise(off._debug, on._debug),
+        allPatchGap: colourGap(on._debug, "all"),
+        accepted: on._debug.bites ? on._debug.bites.accepted.length : 0,
+        rejected: on._debug.bites ? on._debug.bites.rejected : [],
+        warnings: on.warnings
+      };
+      report.cases.push(entry);
+      say(c.src + "  bite " + (bOff.share * 100).toFixed(2) + "% -> " +
+          (bOn.share * 100).toFixed(2) + "%  q" + off.metrics.quality + "->" +
+          on.metrics.quality + "  colourGap " + gap);
+
+      if (bOn.bite < bOff.bite) improved++;
+      /* A repair is allowed to cost quality, and should.
+         `patched` is part of the score on purpose: the more of a cutout is
+         painted rather than photographed, the less it should be trusted, and
+         a garment with a sixth of it reconstructed genuinely is a weaker
+         cutout than a clean product shot. The old score of 98 was flattering a
+         cutout with a hole in it. What must not happen is a drop that is not
+         explained by the painting — or one that goes unmentioned, since the
+         score gates the offer of a paid AI render. */
+      const drop = off.metrics.quality - on.metrics.quality;
+      const explained = drop <= Math.max(2, Math.round(on.metrics.occluded * 150)) &&
+                        (drop <= 2 || on.warnings.some(x => /hid/.test(x)));
+      if (!explained) worseQuality++;
+      entry.qualityDrop = drop;
+      entry.dropExplained = explained;
+      if (gap !== null && gap > 45) badColour.push(c.src + " gap " + gap);
+
+      const tag = c.src.replace(/[^a-z0-9]+/gi, "_");
+      const row = document.createElement("div");
+      row.className = "row";
+      const lbl = document.createElement("div");
+      lbl.textContent = c.src.replace("testset/", "") + "\nbite " +
+        (bOff.share * 100).toFixed(2) + "% → " + (bOn.share * 100).toFixed(2) + "%";
+      row.appendChild(lbl);
+      document.getElementById("shelf").appendChild(row);
+      row.appendChild(await shot("occ_off_" + tag + ".png", off.image));
+      row.appendChild(await shot("occ_on_" + tag + ".png", on.image));
+      flush();
+    }
+
+    const withBites = report.cases.filter(c => c.bitePixelsBefore > 200);
+    check("the photos that had a real bite are the ones that got repaired",
+          withBites.length >= 2, withBites.map(c => c.src.replace("testset/", "")).join(", "));
+    check("every one of them lost most of its bite",
+          withBites.every(c => c.bitePixelsAfter < c.bitePixelsBefore * 0.5),
+          withBites.map(c => c.bitePixelsBefore + "->" + c.bitePixelsAfter).join(", "));
+    check("no quality drop goes unexplained or unreported",
+          worseQuality === 0,
+          report.cases.map(c => c.src.replace("testset/", "") + " -" + c.qualityDrop).join(", "));
+    check("the fabric painted behind hair and limbs matches the garment",
+          badColour.length === 0, badColour.join("; ") || "every repair within 45");
+    /* The neckline guard, measured. This is the check that earns the right to
+       fill bites high on the chest at all: the rule was loosened from "never
+       above the bust" to "only where fabric continues above", and without this
+       there is nothing stopping the looser rule from painting V-necks shut. */
+    const neckFilled = report.cases.filter(c => c.topEdge && c.topEdge.columnsRisen > 3);
+    check("no garment's top edge was pulled up towards the chin",
+          neckFilled.length === 0,
+          neckFilled.map(c => c.src.replace("testset/", "") + ": " + c.topEdge.columnsRisen +
+                              " columns, up to " + c.topEdge.maxRise + "px").join("; ") ||
+          report.cases.map(c => c.topEdge.columnsRisen).join("/") + " columns risen anywhere");
+
+    check("a clean product-style shot is left alone",
+          report.cases.filter(c => c.bitePixelsBefore < 60)
+                      .every(c => c.occluded < 0.01),
+          report.cases.filter(c => c.bitePixelsBefore < 60)
+                      .map(c => c.src.replace("testset/", "") + " " + c.occluded).join(", "));
+    check("notches that are mostly open sky are refused, not filled",
+          report.cases.some(c => c.rejected.some(r => /background/.test(r.why))),
+          report.cases.flatMap(c => c.rejected.map(r => r.why)).join(" | ").slice(0, 200));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

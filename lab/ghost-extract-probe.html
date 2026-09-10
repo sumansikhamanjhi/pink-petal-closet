@@ -1,0 +1,110 @@
+﻿<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Ghost-mannequin extraction</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">runningâ€¦</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../modules/body-model.js"></script>
+<script src="../modules/garment-straighten.js"></script>
+<script src="../modules/garment-fit.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const check = (n, p, d) => { report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) }); };
+
+/**
+ * Does a ghost-mannequin render actually crop cleanly, and does it need less
+ * warping than the flat photograph it came from?
+ *
+ * That second question is the whole point. A ghost render already has the body
+ * shape in it, so garment-fit should be doing gentle scaling rather than
+ * fighting a flat sheet into a torso â€” and "how hard did the fit have to work"
+ * is a number the fit module already reports.
+ */
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+function checker(ctx, x, y, w, h, s, a, b) {
+  for (let yy = 0; yy < h; yy += s) for (let xx = 0; xx < w; xx += s) {
+    ctx.fillStyle = ((xx / s | 0) + (yy / s | 0)) % 2 ? a : b;
+    ctx.fillRect(x + xx, y + yy, Math.min(s, w - xx), Math.min(s, h - yy));
+  }
+}
+
+(async function () {
+  try {
+    const base = await load("../assets/mannequin_base.jpg");
+    const FW = 512, FH = Math.round(FW * base.naturalHeight / base.naturalWidth);
+
+    const cases = [
+      { id: "ghost", label: "ghost render", file: "generated/ghost_dress.png" },
+      { id: "flat",  label: "the flat photo", file: "../assets/red_cocktail_dress.jpg" }
+    ];
+
+    const PW = 250, PH = Math.round(PW * FH / FW) + 18;
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * 4; sheet.height = PH * cases.length;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018"; sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    const results = {};
+    for (let i = 0; i < cases.length; i++) {
+      const c = cases[i];
+      const img = await load(c.file);
+      const cut = await GarmentCutout.extract(img, { category: "dresses" });
+      const fitted = GarmentFit.fit(cut, "dresses", { frameWidth: FW, frameHeight: FH });
+      results[c.id] = {
+        label: c.label,
+        source: img.naturalWidth + "x" + img.naturalHeight,
+        cutout: cut.width + "x" + cut.height,
+        quality: cut.metrics.quality,
+        solidity: cut.metrics.solidity,
+        coverage: cut.metrics.coverage,
+        placement: fitted.placement.top.toFixed(3) + "-" + fitted.placement.bottom.toFixed(3),
+        warp: fitted.warp,
+        // how far from 1.0 the per-row squeeze had to go, averaged: the
+        // measure of how much violence the fit did to the garment
+        warpEffort: +(Math.abs(fitted.warp.mean - 1) + (fitted.warp.max - fitted.warp.min)).toFixed(3)
+      };
+
+      const y = i * PH + 16;
+      const label = (k, t) => { sc.fillStyle = "#8ad"; sc.font = "11px monospace";
+        sc.fillText((k === 0 ? c.label + "  " : "") + t, k * PW + 4, i * PH + 12); };
+      const draw = (k, cv) => { if (!cv) return;
+        const s = Math.min(PW / cv.width, (PH - 20) / cv.height);
+        sc.drawImage(cv, k * PW + (PW - cv.width * s) / 2, y, cv.width * s, cv.height * s); };
+
+      label(0, "source"); draw(0, img);
+      checker(sc, PW, y, PW, PH - 20, 10, "#2a2a34", "#3a3a46");
+      label(1, "cutout"); draw(1, cut.canvas);
+      const over = document.createElement("canvas");
+      over.width = FW; over.height = FH;
+      const oc = over.getContext("2d");
+      oc.drawImage(base, 0, 0, FW, FH);
+      oc.drawImage(fitted.canvas, 0, 0);
+      label(2, "on the mannequin"); draw(2, over);
+      checker(sc, 3 * PW, y, PW, PH - 20, 10, "#2a2a34", "#3a3a46");
+      label(3, "fitted layer"); draw(3, fitted.canvas);
+    }
+    report.results = results;
+
+    check("the ghost render extracts cleanly", results.ghost.quality >= 90,
+          "quality " + results.ghost.quality);
+    check("the cutout is solid, not chewed", results.ghost.solidity >= 0.99, results.ghost.solidity);
+    check("the ghost render needs less warping than the flat photo",
+          results.ghost.warpEffort <= results.flat.warpEffort,
+          "ghost " + results.ghost.warpEffort + " vs flat " + results.flat.warpEffort);
+
+    await post("/save?name=ghost_extract.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>
+

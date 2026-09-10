@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>judge: fill quality</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script>
+/**
+ * FILL-QUALITY JUDGE.
+ *
+ * Amputates a coat-back-sized region from a real extraction, refills it three
+ * ways, and scores each against the pixels that were deleted -- so the fill is
+ * measured against ground truth rather than argued about.
+ *
+ *   mirror  reflect about the garment's own measured symmetry axis
+ *   band    per-row local reflection about the nearest silhouette edge
+ *   smooth  the codebase's own inpaintHoles, reimplemented verbatim (it is a
+ *           module-private closure, so this is what shipping it would give you)
+ *   engine  GarmentEngine's inpaint variant: 8-neighbour + a radius-2 blur
+ *           mixed 0.35/0.65, reimplemented so no MediaPipe load is needed
+ */
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+const HB=(s)=>fetch(SINK+"/save?name=hb-"+s+".txt",{method:"POST",body:btoa(s)}).catch(()=>{});
+const CASES = [
+  { id: "jacket",   cat: "jackets",  file: "../assets/navy_denim_jacket.jpg",   region: { x: 0.100, y: 0.120, w: 0.800, h: 0.760 } },
+  { id: "turtle",   cat: "tops",     file: "../assets/olive_turtleneck.jpg",    region: { x: 0.150, y: 0.030, w: 0.700, h: 0.930 } },
+  { id: "floral",   cat: "dresses",  file: "../assets/floral_white_dress.jpg",  region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  { id: "skirt",    cat: "bottoms",  file: "../assets/black_leather_skirt.jpg", region: { x: 0.180, y: 0.100, w: 0.640, h: 0.800 } },
+  { id: "jeans",    cat: "bottoms",  file: "../assets/dark_skinny_jeans.jpg",   region: { x: 0.240, y: 0.070, w: 0.520, h: 0.880 } },
+  { id: "boots",    cat: "footwear", file: "../assets/black_ankle_boots.jpg",   region: { x: 0.120, y: 0.140, w: 0.760, h: 0.740 } },
+  { id: "bag", cat: "bags", file: "../assets/sage_leather_handbag.jpg", region: { x: 0.150, y: 0.130, w: 0.700, h: 0.740 } }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+/* ---------------------------------------------------- symmetry measurement */
+/** Best self-reflection IoU of the garment's own alpha, and the axis that wins. */
+function symmetryAxis(alpha, w, h) {
+  // quarter scale keeps 40 candidate axes instant
+  const sw = Math.max(8, w >> 2), sh = Math.max(8, h >> 2);
+  const a = new Float32Array(sw * sh);
+  for (let y = 0; y < sh; y++)
+    for (let x = 0; x < sw; x++)
+      a[y * sw + x] = alpha[Math.min(h - 1, y * 4) * w + Math.min(w - 1, x * 4)];
+
+  let best = -1, bestAxis = sw / 2;
+  const lo = Math.floor(sw * 0.30), hi = Math.ceil(sw * 0.70);
+  for (let ax = lo; ax <= hi; ax++) {
+    let inter = 0, uni = 0;
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const m = 2 * ax - x;
+        const v = a[y * sw + x];
+        const r = (m >= 0 && m < sw) ? a[y * sw + m] : 0;
+        inter += Math.min(v, r); uni += Math.max(v, r);
+      }
+    }
+    const iou = uni > 0 ? inter / uni : 0;
+    if (iou > best) { best = iou; bestAxis = ax; }
+  }
+  return { axis: bestAxis * 4, symmetry: best };
+}
+
+/* ------------------------------------------------------------------- fills */
+function mirrorFill(px, known, region, w, h, axis) {
+  let done = 0, missed = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (!region[p]) continue;
+      const m = Math.round(2 * axis - x);
+      if (m < 0 || m >= w) { missed++; continue; }
+      const q = y * w + m;
+      if (!known[q] || region[q]) { missed++; continue; }
+      px[p * 4] = px[q * 4]; px[p * 4 + 1] = px[q * 4 + 1]; px[p * 4 + 2] = px[q * 4 + 2];
+      done++;
+    }
+  }
+  return { done, missed };
+}
+
+function bandFill(px, known, region, w, h, reach) {
+  let done = 0, missed = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (!region[p]) continue;
+      // nearest known fabric on this row, either side
+      let src = -1, d = 1e9;
+      for (let k = 1; k <= reach; k++) {
+        if (x - k >= 0 && known[y * w + x - k] && !region[y * w + x - k]) { src = x - k; d = k; break; }
+        if (x + k < w && known[y * w + x + k] && !region[y * w + x + k]) { src = x + k; d = k; break; }
+      }
+      if (src < 0) { missed++; continue; }
+      // reflect about that inner edge, clamped into the known run
+      let m = src + (src - x);
+      if (m < 0 || m >= w || !known[y * w + m] || region[y * w + m]) m = src;
+      // deterministic small y jitter so a long fill is not a 1px column smear
+      const jy = Math.min(h - 1, Math.max(0, y + ((x * 7 + y * 13) % 7) - 3));
+      let q = jy * w + m;
+      if (!known[q] || region[q]) q = y * w + m;
+      px[p * 4] = px[q * 4]; px[p * 4 + 1] = px[q * 4 + 1]; px[p * 4 + 2] = px[q * 4 + 2];
+      done++;
+    }
+  }
+  return { done, missed };
+}
+
+/** modules/garment-cutout.js inpaintHoles, verbatim algorithm. */
+function smoothFill(px, hole, w, h, passes) {
+  const out = px;
+  const known = new Uint8Array(w * h);
+  for (let p = 0; p < w * h; p++) known[p] = hole[p] ? 0 : 1;
+  let frontier = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = y * w + x;
+    if (!hole[p]) continue;
+    if ((x > 0 && known[p - 1]) || (x < w - 1 && known[p + 1]) ||
+        (y > 0 && known[p - w]) || (y < h - 1 && known[p + w])) frontier.push(p);
+  }
+  while (frontier.length) {
+    const next = [], writes = [];
+    for (const p of frontier) {
+      const x = p % w, y = (p - x) / w;
+      let r = 0, g = 0, b = 0, n = 0;
+      const take = q => { if (known[q]) { r += out[q * 4]; g += out[q * 4 + 1]; b += out[q * 4 + 2]; n++; } };
+      if (x > 0) take(p - 1);
+      if (x < w - 1) take(p + 1);
+      if (y > 0) take(p - w);
+      if (y < h - 1) take(p + w);
+      if (n) writes.push([p, r / n, g / n, b / n]);
+    }
+    for (const [p, r, g, b] of writes) {
+      out[p * 4] = r; out[p * 4 + 1] = g; out[p * 4 + 2] = b; known[p] = 1;
+    }
+    for (const [p] of writes) {
+      const x = p % w, y = (p - x) / w;
+      const push = q => { if (hole[q] && !known[q]) next.push(q); };
+      if (x > 0) push(p - 1);
+      if (x < w - 1) push(p + 1);
+      if (y > 0) push(p - w);
+      if (y < h - 1) push(p + w);
+    }
+    frontier = next;
+  }
+  for (let it = 0; it < (passes === undefined ? 4 : passes); it++) {
+    const copy = new Uint8ClampedArray(out);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const p = y * w + x;
+      if (!hole[p]) continue;
+      for (let c = 0; c < 3; c++)
+        out[p * 4 + c] = (copy[(p - 1) * 4 + c] + copy[(p + 1) * 4 + c] +
+                          copy[(p - w) * 4 + c] + copy[(p + w) * 4 + c]) / 4;
+    }
+  }
+}
+
+function blurF(src, w, h, r) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0, n = 0;
+    for (let d = -r; d <= r; d++) { const xx = x + d; if (xx < 0 || xx >= w) continue; s += src[y * w + xx]; n++; }
+    tmp[y * w + x] = s / n;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0, n = 0;
+    for (let d = -r; d <= r; d++) { const yy = y + d; if (yy < 0 || yy >= h) continue; s += tmp[yy * w + x]; n++; }
+    out[y * w + x] = s / n;
+  }
+  return out;
+}
+
+/** garment-engine.js inpaint: 8-neighbour flood then a radius-2 blur mixed 0.35/0.65. */
+function engineFill(px, hole, known0, w, h) {
+  const filled = new Uint8Array(known0);
+  let remaining = [];
+  for (let p = 0; p < w * h; p++) if (hole[p]) remaining.push(p);
+  for (let pass = 0; pass < 64 && remaining.length; pass++) {
+    const next = [], writes = [];
+    for (const p of remaining) {
+      const x = p % w, y = (p - x) / w;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx; if (xx < 0 || xx >= w) continue;
+          const q = yy * w + xx;
+          if (!filled[q]) continue;
+          r += px[q * 4]; g += px[q * 4 + 1]; b += px[q * 4 + 2]; n++;
+        }
+      }
+      if (n) writes.push([p, r / n, g / n, b / n]); else next.push(p);
+    }
+    for (const [p, r, g, b] of writes) {
+      px[p * 4] = r; px[p * 4 + 1] = g; px[p * 4 + 2] = b; filled[p] = 1;
+    }
+    if (!writes.length) break;
+    remaining = next;
+  }
+  const ch = [0, 1, 2].map(c => {
+    const s = new Float32Array(w * h);
+    for (let p = 0; p < w * h; p++) s[p] = px[p * 4 + c];
+    return blurF(s, w, h, 2);
+  });
+  for (let p = 0; p < w * h; p++) {
+    if (!hole[p]) continue;
+    for (let c = 0; c < 3; c++) px[p * 4 + c] = px[p * 4 + c] * 0.35 + ch[c][p] * 0.65;
+  }
+}
+
+/* ------------------------------------------------- seam luminance matching */
+const LUMA = [0.2126, 0.7152, 0.0722];
+function seamGain(orig, filledPx, known, region, w, h) {
+  // 1px collar of known fabric around the region vs what landed just inside it
+  let sumK = 0, nK = 0, sumF = 0, nF = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const p = y * w + x;
+    if (region[p]) continue;
+    if (!known[p]) continue;
+    if (region[p - 1] || region[p + 1] || region[p - w] || region[p + w]) {
+      sumK += orig[p * 4] * LUMA[0] + orig[p * 4 + 1] * LUMA[1] + orig[p * 4 + 2] * LUMA[2]; nK++;
+    }
+  }
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const p = y * w + x;
+    if (!region[p]) continue;
+    if (!(region[p - 1] && region[p + 1] && region[p - w] && region[p + w])) {
+      sumF += filledPx[p * 4] * LUMA[0] + filledPx[p * 4 + 1] * LUMA[1] + filledPx[p * 4 + 2] * LUMA[2]; nF++;
+    }
+  }
+  if (!nK || !nF || sumF <= 0) return 1;
+  return Math.max(0.75, Math.min(1.33, (sumK / nK) / (sumF / nF)));
+}
+
+/* -------------------------------------------------------------- comparison */
+function compare(truth, got, region, w, h) {
+  let n = 0, sad = 0, within12 = 0, within24 = 0;
+  // gradient-energy ratio: does the fill carry any high-frequency content?
+  let gTruth = 0, gGot = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const p = y * w + x;
+    if (!region[p]) continue;
+    let d = 0;
+    for (let c = 0; c < 3; c++) d += Math.abs(truth[p * 4 + c] - got[p * 4 + c]);
+    d /= 3; sad += d; n++;
+    if (d <= 12) within12++;
+    if (d <= 24) within24++;
+    for (let c = 0; c < 3; c++) {
+      gTruth += Math.abs(truth[p * 4 + c] - truth[(p + 1) * 4 + c]) + Math.abs(truth[p * 4 + c] - truth[(p + w) * 4 + c]);
+      gGot   += Math.abs(got[p * 4 + c]   - got[(p + 1) * 4 + c])   + Math.abs(got[p * 4 + c]   - got[(p + w) * 4 + c]);
+    }
+  }
+  return {
+    mae: n ? +(sad / n).toFixed(2) : null,
+    pctWithin12: n ? +(100 * within12 / n).toFixed(1) : null,
+    pctWithin24: n ? +(100 * within24 / n).toFixed(1) : null,
+    textureRatio: gTruth > 0 ? +(gGot / gTruth).toFixed(3) : null
+  };
+}
+
+(async function () {
+  const report = { note: "MAE is mean |truth-fill| per channel over the amputated region. textureRatio 1.0 = same high-frequency energy as the real fabric, 0 = flat.", cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+
+  const PW = 190, PH = 230, PANELS = 6;
+  const sheet = document.createElement("canvas");
+  sheet.width = PANELS * PW; sheet.height = CASES.length * PH;
+  const sc = sheet.getContext("2d");
+  sc.fillStyle = "#101018"; sc.fillRect(0, 0, sheet.width, sheet.height);
+  sc.font = "11px monospace";
+
+  for (let ci = 0; ci < CASES.length; ci++) {
+    const cse = CASES[ci];
+    const entry = { id: cse.id, cat: cse.cat };
+    try {
+      await HB("01-load-"+cse.id); const img = await load(cse.file);
+      const cut = await window.GarmentCutout.extract(img, {
+        region: cse.region, category: cse.cat, workingMaxDim: 768, outputMaxDim: 768, padding: 3
+      });
+      await HB("02-extracted-"+cse.id); const w = cut.width, h = cut.height;
+      const ctx = cut.canvas.getContext("2d", { willReadFrequently: true });
+      const orig = ctx.getImageData(0, 0, w, h).data;
+
+      const known = new Uint8Array(w * h);
+      for (let p = 0; p < w * h; p++) known[p] = cut.alpha[p] > 0.9 ? 1 : 0;
+
+      await HB("03-sym-"+cse.id); const sym = symmetryAxis(cut.alpha, w, h);
+      entry.size = { w, h };
+      entry.axisFrac = +(sym.axis / w).toFixed(3);
+      entry.symmetryIoU = +sym.symmetry.toFixed(3);
+
+      // AMPUTATE: a coat-back-sized vertical band on the right of the garment,
+      // spanning shoulder-to-hem. This is "the back of the coat is missing".
+      const region = new Uint8Array(w * h);
+      let rn = 0;
+      const rx0 = Math.round(w * 0.52), rx1 = Math.round(w * 0.88);
+      const ry0 = Math.round(h * 0.20), ry1 = Math.round(h * 0.85);
+      for (let y = ry0; y < ry1; y++) for (let x = rx0; x < rx1; x++) {
+        const p = y * w + x;
+        if (known[p]) { region[p] = 1; rn++; }
+      }
+      entry.amputatedPx = rn;
+      entry.amputatedPctOfGarment = +(100 * rn / known.reduce((a, b) => a + b, 0)).toFixed(1);
+
+      await HB("04-amputated-"+cse.id); const variants = {};
+      const mk = () => { const c = new Uint8ClampedArray(orig.length); c.set(orig); return c; };
+
+      // mirror
+      {
+        const px = mk();
+        const r = mirrorFill(px, known, region, w, h, sym.axis);
+        const g = seamGain(orig, px, known, region, w, h);
+        for (let p = 0; p < w * h; p++) if (region[p]) for (let c = 0; c < 3; c++) px[p * 4 + c] = px[p * 4 + c] * g;
+        variants.mirror = px;
+        entry.mirror = Object.assign(compare(orig, px, region, w, h), { coverage: +(100 * r.done / rn).toFixed(1), gain: +g.toFixed(3) });
+      }
+      await HB("05-mirror-"+cse.id);
+      // band
+      {
+        const px = mk();
+        const r = bandFill(px, known, region, w, h, Math.round(w * 0.25));
+        variants.band = px;
+        entry.band = Object.assign(compare(orig, px, region, w, h), { coverage: +(100 * r.done / rn).toFixed(1) });
+      }
+      await HB("06-band-"+cse.id);
+      // smooth (GarmentCutout inpaintHoles)
+      {
+        const px = mk();
+        smoothFill(px, region, w, h, 4);
+        variants.smooth = px;
+        entry.smooth = compare(orig, px, region, w, h);
+      }
+      await HB("07-smooth-"+cse.id);
+      // engine inpaint
+      {
+        const px = mk();
+        const k0 = new Uint8Array(w * h);
+        for (let p = 0; p < w * h; p++) k0[p] = (known[p] && !region[p]) ? 1 : 0;
+        engineFill(px, region, k0, w, h);
+        variants.engine = px;
+        entry.engine = compare(orig, px, region, w, h);
+      }
+
+      await HB("08-engine-"+cse.id);
+      // contact sheet row: truth | amputated | mirror | band | smooth | engine
+      const panels = [["truth", orig], ["cut", null], ["mirror", variants.mirror],
+                      ["band", variants.band], ["smooth", variants.smooth], ["engine", variants.engine]];
+      for (let pi = 0; pi < panels.length; pi++) {
+        const [label, data] = panels[pi];
+        const tmp = document.createElement("canvas"); tmp.width = w; tmp.height = h;
+        const tc = tmp.getContext("2d");
+        const im = tc.createImageData(w, h);
+        if (data) {
+          im.data.set(data);
+        } else {
+          im.data.set(orig);
+          for (let p = 0; p < w * h; p++) if (region[p]) { im.data[p * 4] = 255; im.data[p * 4 + 1] = 0; im.data[p * 4 + 2] = 160; }
+        }
+        // force the garment opaque over a light ground so fills are legible
+        for (let p = 0; p < w * h; p++) im.data[p * 4 + 3] = known[p] ? 255 : 0;
+        tc.putImageData(im, 0, 0);
+        const s = Math.min((PW - 8) / w, (PH - 22) / h);
+        const dw = w * s, dh = h * s;
+        sc.fillStyle = "#e8e8ee";
+        sc.fillRect(pi * PW + 2, ci * PH + 16, PW - 4, PH - 20);
+        sc.drawImage(tmp, pi * PW + (PW - dw) / 2, ci * PH + 16 + (PH - 20 - dh) / 2, dw, dh);
+        sc.fillStyle = "#9fe";
+        sc.fillText(cse.id + " " + label, pi * PW + 4, ci * PH + 12);
+      }
+    } catch (e) {
+      entry.error = String(e && e.message || e);
+    }
+    report.cases.push(entry);
+    say();
+  }
+
+  // rank the four fills by mean MAE over the garment-shaped cases only
+  const garment = report.cases.filter(c => !c.error && ["jackets", "tops", "dresses", "bottoms"].includes(c.cat));
+  const props = ["bags", "footwear"];
+  const propCases = report.cases.filter(c => !c.error && props.includes(c.cat));
+  const avg = (arr, k) => arr.length ? +(arr.reduce((a, c) => a + (c[k] ? c[k].mae : 0), 0) / arr.length).toFixed(2) : null;
+  const avgT = (arr, k) => arr.length ? +(arr.reduce((a, c) => a + (c[k] ? c[k].textureRatio : 0), 0) / arr.length).toFixed(3) : null;
+  report.summary = {
+    garmentShaped: { mirrorMAE: avg(garment, "mirror"), bandMAE: avg(garment, "band"), smoothMAE: avg(garment, "smooth"), engineMAE: avg(garment, "engine"),
+                     mirrorTexture: avgT(garment, "mirror"), bandTexture: avgT(garment, "band"), smoothTexture: avgT(garment, "smooth"), engineTexture: avgT(garment, "engine") },
+    propsShaped:   { mirrorMAE: avg(propCases, "mirror"), bandMAE: avg(propCases, "band"), smoothMAE: avg(propCases, "smooth"), engineMAE: avg(propCases, "engine") }
+  };
+  say();
+
+  await post("/save?name=fill-judge.png", sheet.toDataURL("image/png").split(",")[1]);
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

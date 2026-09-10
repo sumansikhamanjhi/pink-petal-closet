@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>module: garment-fit</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../modules/body-model.js"></script>
+<script src="../modules/garment-straighten.js"></script>
+<script src="../modules/garment-fit.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Module 2 in isolation: one garment at a time, reshaped onto the body.
+ * Panels: the flat cutout, the reshaped garment alone, the reshaped garment
+ * over the mannequin, and the same with the body profile drawn on so a fit
+ * that is too wide or sitting too high is obvious rather than a matter of
+ * opinion.
+ */
+const CASES = [
+  { id: "d1", cat: "dresses",  file: "../assets/floral_white_dress.jpg",    region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  { id: "d2", cat: "dresses",  file: "../assets/red_cocktail_dress.jpg",    region: { x: 0.180, y: 0.080, w: 0.640, h: 0.870 } },
+  { id: "t6", cat: "tops",     file: "../assets/white_ribbed_top.jpg",      region: { x: 0.192, y: 0.123, w: 0.615, h: 0.733 } },
+  { id: "t3", cat: "tops",     file: "../assets/white_linen_blouse.jpg",    region: { x: 0.140, y: 0.110, w: 0.720, h: 0.790 } },
+  { id: "b1", cat: "bottoms",  file: "../assets/sage_pleated_skirt.jpg",    region: { x: 0.150, y: 0.090, w: 0.700, h: 0.860 } },
+  { id: "b3", cat: "bottoms",  file: "../assets/dark_skinny_jeans.jpg",     region: { x: 0.240, y: 0.070, w: 0.520, h: 0.880 } },
+  { id: "j1", cat: "jackets",  file: "../assets/navy_denim_jacket.jpg",     region: { x: 0.100, y: 0.120, w: 0.800, h: 0.760 } },
+  { id: "f1", cat: "footwear", file: "../assets/cream_retro_sneakers.jpg",  region: { x: 0.098, y: 0.251, w: 0.817, h: 0.541 } },
+  { id: "f2", cat: "footwear", file: "../assets/black_ankle_boots.jpg",     region: { x: 0.120, y: 0.140, w: 0.760, h: 0.740 } },
+  { id: "bg1", cat: "bags",    file: "../assets/sage_leather_handbag.jpg",  region: { x: 0.150, y: 0.130, w: 0.700, h: 0.740 } }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+function drawBody(ctx, W, H) {
+  const pts = BodyModel.BODY.profile;
+  const cx = BodyModel.BODY.centreX * W;
+  ctx.beginPath();
+  ctx.moveTo(cx - pts[0][1] * W, pts[0][0] * H);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(cx - pts[i][1] * W, pts[i][0] * H);
+  for (let i = pts.length - 1; i >= 0; i--) ctx.lineTo(cx + pts[i][1] * W, pts[i][0] * H);
+  ctx.closePath();
+  ctx.strokeStyle = "rgba(255,44,192,0.9)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    const base = await load("../assets/mannequin_base.jpg");
+    const FW = 512, FH = Math.round(FW * base.naturalHeight / base.naturalWidth);
+    report.frame = FW + "x" + FH;
+
+    const PW = 200, PH = Math.round(PW * FH / FW) + 18, PANELS = 4;
+    const sheet = document.createElement("canvas");
+    sheet.width = PANELS * PW;
+    sheet.height = CASES.length * PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const cse = CASES[i];
+      const entry = { id: cse.id, cat: cse.cat };
+      const img = await load(cse.file);
+      const cut = await GarmentCutout.extract(img, { region: cse.region, category: cse.cat });
+      const fitted = GarmentFit.fit(cut, cse.cat, { frameWidth: FW, frameHeight: FH });
+      entry.placement = {
+        top: +fitted.placement.top.toFixed(3),
+        bottom: +fitted.placement.bottom.toFixed(3),
+        span: +fitted.placement.span.toFixed(3),
+        scale: +fitted.placement.scale.toFixed(3)
+      };
+      entry.warp = fitted.warp;
+
+      const y = i * PH + 16;
+      const cell = (k) => ({ x: k * PW, y });
+      const label = (k, name) => {
+        sc.fillStyle = "#8ad"; sc.font = "11px monospace";
+        sc.fillText((k === 0 ? cse.id + " " + cse.cat + "  " : "") + name, k * PW + 4, i * PH + 12);
+      };
+      const fitDraw = (k, source) => {
+        const c = cell(k);
+        const s = Math.min(PW / source.width, (PH - 20) / source.height);
+        sc.drawImage(source, c.x + (PW - source.width * s) / 2, c.y, source.width * s, source.height * s);
+        return s;
+      };
+
+      label(0, "cutout"); fitDraw(0, cut.canvas);
+
+      sc.fillStyle = "#22222c";
+      sc.fillRect(PW, y, PW, PH - 20);
+      label(1, "reshaped"); fitDraw(1, fitted.canvas);
+
+      // over the mannequin
+      const over = document.createElement("canvas");
+      over.width = FW; over.height = FH;
+      const oc = over.getContext("2d");
+      oc.drawImage(base, 0, 0, FW, FH);
+      oc.drawImage(fitted.canvas, 0, 0);
+      label(2, "on mannequin"); fitDraw(2, over);
+
+      const guide = document.createElement("canvas");
+      guide.width = FW; guide.height = FH;
+      const gc = guide.getContext("2d");
+      gc.drawImage(over, 0, 0);
+      drawBody(gc, FW, FH);
+      gc.strokeStyle = "rgba(0,229,255,0.9)";
+      gc.lineWidth = 1;
+      for (const yy of [fitted.placement.top, fitted.placement.bottom]) {
+        gc.beginPath(); gc.moveTo(0, yy * FH); gc.lineTo(FW, yy * FH); gc.stroke();
+      }
+      label(3, "vs body"); fitDraw(3, guide);
+
+      report.cases.push(entry);
+      say();
+    }
+    await post("/save?name=module_fit.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

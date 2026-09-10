@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>module: seg-watershed</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<div id="out"></div>
+<script src="../modules/seg-watershed.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Tests seg-watershed ALONE: no engine, no vision model, no app. Feeds it an
+ * image plus markers derived only from the known box, and shows what it decides.
+ * These are exactly the three cases the colour-threshold segmentation gets
+ * wrong today.
+ */
+const CASES = [
+  { id: "d1", file: "../assets/floral_white_dress.jpg",   region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  { id: "t6", file: "../assets/white_ribbed_top.jpg",     region: { x: 0.192, y: 0.123, w: 0.615, h: 0.733 } },
+  { id: "f1", file: "../assets/cream_retro_sneakers.jpg", region: { x: 0.098, y: 0.251, w: 0.817, h: 0.541 } },
+  { id: "b1", file: "../assets/sage_pleated_skirt.jpg",   region: { x: 0.150, y: 0.090, w: 0.700, h: 0.860 } },
+  { id: "j1", file: "../assets/navy_denim_jacket.jpg",    region: { x: 0.100, y: 0.120, w: 0.800, h: 0.760 } }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+function toCanvas(img, maxDim) {
+  const s = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+  const cv = document.createElement("canvas");
+  cv.width = Math.round(img.naturalWidth * s);
+  cv.height = Math.round(img.naturalHeight * s);
+  cv.getContext("2d", { willReadFrequently: true }).drawImage(img, 0, 0, cv.width, cv.height);
+  return cv;
+}
+
+function paint(w, h, get) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d");
+  const d = c.createImageData(w, h);
+  for (let p = 0; p < w * h; p++) {
+    const v = get(p);
+    d.data[p * 4] = v[0]; d.data[p * 4 + 1] = v[1]; d.data[p * 4 + 2] = v[2];
+    d.data[p * 4 + 3] = v.length > 3 ? v[3] : 255;
+  }
+  c.putImageData(d, 0, 0);
+  return cv;
+}
+
+/**
+ * Markers from the box alone, with no colour assumptions:
+ *   subject  = a small core in the middle of the box
+ *   backdrop = everything outside the box, plus the box's own corners
+ * The corners matter: a tight box around a garment has background in them,
+ * and seeding them stops the flood escaping around the outside.
+ */
+function markersFromBox(w, h, region) {
+  const bx0 = Math.round(region.x * w), by0 = Math.round(region.y * h);
+  const bx1 = Math.round((region.x + region.w) * w), by1 = Math.round((region.y + region.h) * h);
+  const bw = bx1 - bx0, bh = by1 - by0;
+  const fg = new Uint8Array(w * h), bg = new Uint8Array(w * h);
+
+  const cx0 = bx0 + Math.round(bw * 0.40), cx1 = bx1 - Math.round(bw * 0.40);
+  const cy0 = by0 + Math.round(bh * 0.40), cy1 = by1 - Math.round(bh * 0.40);
+  for (let y = cy0; y <= cy1; y++) for (let x = cx0; x <= cx1; x++) fg[y * w + x] = 1;
+
+  const pad = Math.max(2, Math.round(Math.min(w, h) * 0.02));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const outside = x < bx0 - pad || x > bx1 + pad || y < by0 - pad || y > by1 + pad;
+      if (outside) bg[y * w + x] = 1;
+    }
+  }
+  const corner = Math.round(Math.min(bw, bh) * 0.10);
+  const corners = [[bx0, by0], [bx1 - corner, by0], [bx0, by1 - corner], [bx1 - corner, by1 - corner]];
+  for (const [cx, cy] of corners) {
+    for (let y = cy; y < cy + corner && y < h; y++) {
+      for (let x = cx; x < cx + corner && x < w; x++) if (x >= 0 && y >= 0) bg[y * w + x] = 1;
+    }
+  }
+  return { fg, bg };
+}
+
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    const PW = 250, PH = 290, PANELS = 4;
+    const sheet = document.createElement("canvas");
+    sheet.width = PANELS * PW;
+    sheet.height = CASES.length * PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const cse = CASES[i];
+      const entry = { id: cse.id };
+      const img = await load(cse.file);
+      const cv = toCanvas(img, 768);
+      const w = cv.width, h = cv.height;
+      const px = cv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+
+      const t0 = performance.now();
+      const mk = Watershed.markersFromBackdrop(px, w, h, cse.region, { blur: 1 });
+      const fg = mk.fg, bg = mk.bg;
+      entry.markerStats = mk.stats;
+      const out = Watershed.segment(px, w, h, fg, bg, { grad: mk.grad });
+      entry.ms = Math.round(performance.now() - t0);
+      entry.stats = out.stats;
+      entry.fgFraction = +(out.stats.fg / (w * h)).toFixed(3);
+
+      const panels = [
+        ["source + box", null],
+        ["markers", paint(w, h, p => fg[p] ? [60, 230, 120] : (bg[p] ? [220, 60, 60] : [24, 24, 32]))],
+        ["flat backdrop", paint(w, h, p => mk.flat[p] ? [90, 90, 210] : [16, 16, 22])],
+        ["mask", paint(w, h, p => out.mask[p] ? [255, 255, 255] : [0, 0, 0])]
+      ];
+      for (let k = 0; k < panels.length; k++) {
+        const [name, canvas] = panels[k];
+        const x = k * PW, y = i * PH + 16;
+        const source = canvas || cv;
+        const s = Math.min(PW / source.width, (PH - 20) / source.height);
+        const dx = x + (PW - source.width * s) / 2;
+        sc.drawImage(source, dx, y, source.width * s, source.height * s);
+        if (!canvas) {
+          sc.strokeStyle = "#ff2cc0";
+          sc.lineWidth = 2;
+          sc.strokeRect(dx + cse.region.x * source.width * s, y + cse.region.y * source.height * s,
+                        cse.region.w * source.width * s, cse.region.h * source.height * s);
+        }
+        sc.fillStyle = "#8ad";
+        sc.font = "11px monospace";
+        sc.fillText((k === 0 ? cse.id + "  " : "") + name, x + 4, i * PH + 12);
+      }
+      report.cases.push(entry);
+      say();
+    }
+    await post("/save?name=module_watershed.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

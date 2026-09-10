@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Body model recheck</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}</style></head>
+<body>
+<div id="out"></div>
+<script src="../modules/body-model.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Settles three disputed numbers by drawing all the candidates over the photo
+ * at once, so the answer is read off rather than argued about:
+ *   centre line   0.495 (original) / 0.505 (claimed) / 0.518 (in the module)
+ *   shoulder half 0.135 (in the module) / 0.150 (claimed)
+ *   waist half    0.095 (in the module) / 0.106 (claimed)
+ * Panel 2 zooms the shoulders, panel 3 the waist, because a 0.013 difference is
+ * 10px at this size and invisible in a full-body view.
+ */
+const CENTRES = [
+  { x: 0.495, colour: "#ffd400", label: "0.495 old app" },
+  { x: 0.505, colour: "#00e5ff", label: "0.505 claimed" },
+  { x: 0.518, colour: "#ff2cc0", label: "0.518 module" }
+];
+const WIDTHS = [
+  { y: 0.250, name: "shoulder", a: 0.135, b: 0.150 },
+  { y: 0.310, name: "bust",     a: 0.128, b: 0.140 },
+  { y: 0.405, name: "waist",    a: 0.095, b: 0.106 },
+  { y: 0.462, name: "hip",      a: 0.125, b: 0.132 }
+];
+
+(async function () {
+  const img = new Image();
+  await new Promise(r => { img.onload = r; img.src = "../assets/mannequin_base.jpg"; });
+  const W = 900, H = Math.round(img.naturalHeight * (W / img.naturalWidth));
+
+  const full = document.createElement("canvas");
+  full.width = W; full.height = H;
+  const c = full.getContext("2d");
+  c.drawImage(img, 0, 0, W, H);
+
+  for (const cen of CENTRES) {
+    c.strokeStyle = cen.colour;
+    c.lineWidth = 1.5;
+    c.beginPath(); c.moveTo(cen.x * W, 0); c.lineTo(cen.x * W, H); c.stroke();
+    c.fillStyle = cen.colour;
+    c.font = "13px monospace";
+    c.fillText(cen.label, cen.x * W + 4, 16 + CENTRES.indexOf(cen) * 16);
+  }
+
+  // half-widths drawn about the module's own centre, both candidates
+  const cx = BodyModel.BODY.centreX * W;
+  for (const wd of WIDTHS) {
+    for (const [half, colour, dy] of [[wd.a, "#3cff8a", -3], [wd.b, "#ff8a3c", 3]]) {
+      c.strokeStyle = colour;
+      c.lineWidth = 2;
+      c.beginPath();
+      c.moveTo(cx - half * W, wd.y * H + dy);
+      c.lineTo(cx + half * W, wd.y * H + dy);
+      c.stroke();
+    }
+    c.fillStyle = "#fff";
+    c.font = "12px monospace";
+    c.fillText(wd.name + "  green=" + wd.a + "  orange=" + wd.b, cx + 0.16 * W, wd.y * H + 4);
+  }
+
+  // zoomed crops where the differences live
+  const CROPS = [
+    { name: "shoulders + arms", y0: 0.20, y1: 0.36 },
+    { name: "waist + hip", y0: 0.37, y1: 0.50 }
+  ];
+  const PW = 900, PH = 300;
+  const sheet = document.createElement("canvas");
+  sheet.width = PW;
+  sheet.height = H + CROPS.length * PH + 20;
+  const sc = sheet.getContext("2d");
+  sc.fillStyle = "#101018";
+  sc.fillRect(0, 0, sheet.width, sheet.height);
+  sc.drawImage(full, 0, 0);
+
+  CROPS.forEach((crop, i) => {
+    const sy = crop.y0 * H, sh = (crop.y1 - crop.y0) * H;
+    const s = Math.min(PW / W, PH / sh);
+    const dy = H + 20 + i * PH;
+    sc.drawImage(full, 0, sy, W, sh, 0, dy, W * s, sh * s);
+    sc.fillStyle = "#8ad";
+    sc.font = "13px monospace";
+    sc.fillText(crop.name + "  (zoom x" + s.toFixed(2) + ")", 6, dy - 5);
+  });
+
+  document.getElementById("out").appendChild(sheet);
+  await post("/save?name=body_recheck.png", sheet.toDataURL("image/png"));
+  await post("/report", JSON.stringify({ ok: true, frame: W + "x" + H }));
+})();
+</script>
+</body></html>

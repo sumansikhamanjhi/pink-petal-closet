@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Studio Screenshot</title>
+<style>body{margin:0;background:#fff}iframe{width:1180px;height:1000px;border:0}</style></head>
+<body>
+<iframe id="app" src="../index.html"></iframe>
+<script>
+const wait = ms => new Promise(r => setTimeout(r, ms));
+(async function () {
+  const frame = document.getElementById("app");
+  await new Promise(res => { frame.onload = res; });
+  const win = frame.contentWindow, doc = frame.contentDocument;
+  const blob = await fetch("testset/casual_tshirt_jeans.jpg").then(r => r.blob());
+  await win.handleImageUpload(new win.File([blob], "grey_tshirt.jpg", { type: "image/jpeg" }));
+  await wait(9000);
+  win.openStudioModal();
+  await wait(1200);
+  const canvas = doc.getElementById("crop-canvas");
+  const wrapper = doc.getElementById("crop-canvas-wrapper");
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + rect.width * 0.5, cy = rect.top + rect.height * 0.28;
+  const ev = t => new win.MouseEvent(t, { clientX: cx, clientY: cy, bubbles: true });
+  wrapper.dispatchEvent(ev("mousedown"));
+  wrapper.dispatchEvent(ev("mouseup"));
+  await wait(6000);
+  document.title = "READY";
+})();
+</script>
+</body></html>

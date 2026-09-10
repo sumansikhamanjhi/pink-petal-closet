@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLM app probe</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace}
+iframe{width:1100px;height:700px;border:0}pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app" src="../index.html"></iframe>
+<script>
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const slots = doc => {
+  const o = {};
+  doc.querySelectorAll("#slot-controls-list .slot-control-item").forEach(row => {
+    const t = row.querySelector(".slot-name").textContent.replace(/\s+/g, " ").trim();
+    const m = /^([^:]+):\s*(.*?)(?:\s*\(Base Item.*)?$/.exec(t);
+    if (m) o[m[1].trim()] = m[2].trim();
+  });
+  return o;
+};
+
+(async function () {
+  const report = { steps: [] };
+  const say = s => { report.steps.push(s); document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    const f = document.getElementById("app");
+    await new Promise(res => { f.onload = res; });
+    const win = f.contentWindow, doc = f.contentDocument;
+    win.onerror = (m, s, l) => say("PAGE ERROR " + m + " @" + l);
+    win.localStorage.setItem("pp_mannequin_mode", "composite");
+    await wait(1600);
+
+    // 1. upload a white-on-white product shot through the real uploader
+    const blob = await fetch("../assets/white_ribbed_top.jpg").then(r => r.blob());
+    doc.querySelector('.nav-btn[data-target="add"]').click();
+    await wait(300);
+    await win.handleImageUpload(new win.File([blob], "white_ribbed_top.jpg", { type: "image/jpeg" }));
+    await wait(75000);
+    report.loaderText = (doc.getElementById("loader-status") || {}).textContent;
+    report.upload = {
+      name: doc.getElementById("item-name").value,
+      category: doc.getElementById("item-category").value,
+      colorName: doc.getElementById("item-color-name").value,
+      tags: doc.getElementById("item-tags").value,
+      previewKb: Math.round(doc.getElementById("preview-img").src.length / 1024)
+    };
+    await post("/save?name=app_white_top_cutout.png", doc.getElementById("preview-img").src);
+    say("uploaded");
+
+    // 2. dress the mannequin, with the vision fitting
+    doc.querySelector('.nav-btn[data-target="assistant"]').click();
+    doc.getElementById("stylist-prompt").value = "coffee date";
+    doc.getElementById("btn-generate-outfit").click();
+    await wait(75000);
+    report.mannequin = {
+      caption: doc.getElementById("mannequin-caption").textContent,
+      slots: slots(doc),
+      bytes: doc.getElementById("mannequin-render").src.length
+    };
+    await post("/save?name=app_mannequin_fitted.png", doc.getElementById("mannequin-render").src);
+    say("dressed");
+
+    // 3. lock a slot, pin a base item, shuffle: only the rest may move
+    const rows = Array.from(doc.querySelectorAll("#slot-controls-list .slot-control-item"));
+    const shoeRow = rows.find(r => /^Shoes:/.test(r.textContent.trim()));
+    if (shoeRow) shoeRow.querySelector(".btn-slot-action").click();
+    await wait(400);
+    doc.getElementById("btn-trigger-manual-select").click();
+    await wait(600);
+    const cards = Array.from(doc.querySelectorAll("#modal-items-grid > *"));
+    const card = cards.find(c => c.textContent.indexOf("Sage Pleated Skirt") >= 0) || cards[0];
+    if (card) card.click();
+    await wait(35000);
+    const before = slots(doc);
+    const beforeImg = doc.getElementById("mannequin-render").src;
+
+    doc.getElementById("btn-shuffle-around").click();
+    await wait(35000);
+    const after = slots(doc);
+    const afterImg = doc.getElementById("mannequin-render").src;
+    report.shuffle = {
+      base: doc.getElementById("base-item-name").textContent,
+      before, after,
+      baseHeld: before.Bottom === after.Bottom,
+      lockedShoesHeld: before.Shoes === after.Shoes,
+      othersChanged: Object.keys(before).filter(k => before[k] !== after[k]),
+      pictureChanged: beforeImg !== afterImg
+    };
+    await post("/save?name=app_after_shuffle.png", afterImg);
+    say("shuffled");
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

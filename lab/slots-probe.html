@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Slot occupancy and opt-out probe</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1280px;height:900px;border:0;background:#fff;opacity:0.2}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const check = (name, pass, detail) => {
+  report.checks.push({ name, pass: !!pass, detail: detail === undefined ? "" : String(detail) });
+  say((pass ? "  ok  " : " FAIL ") + name + (detail === undefined ? "" : "  [" + detail + "]"));
+};
+
+/**
+ * Does the wearer's "not today" actually stick?
+ *
+ * The probe seeds localStorage BEFORE the iframe loads rather than through it:
+ * both pages are served from the same origin, so they share storage, and the
+ * app reads the key once during initApp — setting it afterwards would be read
+ * by nothing.
+ */
+const VIBES = ["everyday casual", "summer beach day", "office meeting", "cold december walk"];
+
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    localStorage.removeItem("pp_slot_optout");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = expr => win.eval(expr);
+
+    for (let i = 0; i < 80; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof generateOutfit === 'function'")) break;
+      await wait(250);
+    }
+    const activeOutfit = read("activeOutfit");
+    const generateOutfit = read("generateOutfit");
+    const shuffleOutfit = read("shuffleOutfit");
+    if (!activeOutfit || !generateOutfit) throw new Error("app never finished loading");
+
+    check("the opt-out toggle is exposed", read("typeof toggleSlotInclusion === 'function'"));
+    check("the whitelist excludes the mandatory slots",
+      read("!OPTIONAL_SLOTS.has('tops') && !OPTIONAL_SLOTS.has('bottoms') && " +
+           "!OPTIONAL_SLOTS.has('dresses') && !OPTIONAL_SLOTS.has('footwear') && OPTIONAL_SLOTS.has('jackets')"));
+
+    const filled = cat => !!(activeOutfit.slots[cat].enabled && activeOutfit.slots[cat].itemId);
+    const snapshot = () => {
+      const s = {};
+      for (const cat of Object.keys(activeOutfit.slots)) s[cat] = activeOutfit.slots[cat].itemId;
+      return s;
+    };
+
+    // --- baseline: with no opt-out, a jacket turns up every time
+    let jacketRuns = 0;
+    for (const v of VIBES) { generateOutfit(v); await wait(80); if (filled("jackets")) jacketRuns++; }
+    check("baseline: a jacket is filled for every vibe", jacketRuns === VIBES.length,
+          jacketRuns + "/" + VIBES.length);
+
+    // --- remove it
+    generateOutfit("everyday casual");
+    await wait(80);
+    const before = snapshot();
+    read("toggleSlotInclusion")("jackets");
+    await wait(120);
+    check("removing the jacket empties the slot", !activeOutfit.slots.jackets.itemId,
+          activeOutfit.slots.jackets.itemId);
+    check("removing the jacket also unlocks it", activeOutfit.slots.jackets.locked === false);
+    check("removing the jacket is persisted",
+          (JSON.parse(localStorage.getItem("pp_slot_optout") || "[]")).indexOf("jackets") >= 0,
+          localStorage.getItem("pp_slot_optout"));
+
+    // the whole point: removing ONE slot must not disturb any other
+    const after = snapshot();
+    const moved = Object.keys(before).filter(c => c !== "jackets" && before[c] !== after[c]);
+    check("removing the jacket moved no other slot", moved.length === 0, moved.join(","));
+
+    // --- it stays gone through generate and shuffle
+    let stayedGone = true;
+    for (const v of VIBES) { generateOutfit(v); await wait(80); if (filled("jackets")) stayedGone = false; }
+    check("a removed jacket stays gone across every generate", stayedGone);
+
+    shuffleOutfit(); await wait(120);
+    check("a removed jacket stays gone across a shuffle", !filled("jackets"));
+
+    // --- and it does not appear in what the mannequin is asked to wear
+    const layers = read("currentOutfitLayers")();
+    check("the removed jacket is not in currentOutfitLayers",
+          !layers.some(l => l.cat === "jackets"), layers.map(l => l.cat).join(","));
+
+    // --- the row survives so it can be offered back
+    const rowText = win.document.getElementById("slot-controls-list").textContent;
+    check("the Slot Controls row for the jacket is still shown",
+          rowText.toLowerCase().indexOf("jacket") >= 0);
+    const jacketButtons = [...win.document.querySelectorAll(".slot-control-item")]
+      .filter(el => el.textContent.toLowerCase().indexOf("jacket") >= 0)
+      .map(el => el.querySelectorAll(".btn-slot-action").length)[0];
+    check("the jacket row has both a lock and an include button", jacketButtons === 2, jacketButtons);
+    const firstIsLock = [...win.document.querySelectorAll(".slot-control-item")]
+      .filter(el => el.textContent.toLowerCase().indexOf("jacket") >= 0)
+      .map(el => (el.querySelector(".btn-slot-action").getAttribute("onclick") || ""))[0];
+    check("the lock button is still first in document order",
+          /toggleSlotLock/.test(firstIsLock), firstIsLock);
+
+    // --- put it back: one slot fills, nothing else moves
+    const beforeAdd = snapshot();
+    read("toggleSlotInclusion")("jackets");
+    await wait(140);
+    const afterAdd = snapshot();
+    check("adding the jacket back fills it", !!activeOutfit.slots.jackets.itemId,
+          activeOutfit.slots.jackets.itemId);
+    const movedAdd = Object.keys(beforeAdd).filter(c => c !== "jackets" && beforeAdd[c] !== afterAdd[c]);
+    check("adding the jacket back moved no other slot", movedAdd.length === 0, movedAdd.join(","));
+    check("adding the jacket back clears the persisted opt-out",
+          (JSON.parse(localStorage.getItem("pp_slot_optout") || "[]")).indexOf("jackets") < 0,
+          localStorage.getItem("pp_slot_optout"));
+
+    // --- a mandatory slot refuses
+    read("toggleSlotInclusion")("tops");
+    await wait(80);
+    check("a mandatory slot cannot be removed",
+          (JSON.parse(localStorage.getItem("pp_slot_optout") || "[]")).indexOf("tops") < 0 &&
+          !!activeOutfit.slots.tops.itemId);
+
+    // --- pinning a removed category overrides the opt-out
+    read("toggleSlotInclusion")("bags");
+    await wait(100);
+    const aBag = read("wardrobe").find(i => i.category === "bags");
+    if (aBag) {
+      read("selectManualBaseItem")(aBag.id);
+      await wait(160);
+      check("pinning a garment resurrects its removed slot",
+            !!activeOutfit.slots.bags.itemId &&
+            (JSON.parse(localStorage.getItem("pp_slot_optout") || "[]")).indexOf("bags") < 0,
+            localStorage.getItem("pp_slot_optout"));
+      read("clearManualBaseItem")();
+      await wait(120);
+    } else {
+      check("pinning a garment resurrects its removed slot", true, "no bag in the wardrobe, skipped");
+    }
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

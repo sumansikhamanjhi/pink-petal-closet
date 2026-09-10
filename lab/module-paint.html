@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>module: cutout-paint</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../modules/cutout-paint.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Module 4 alone: no modal, no pointers, no app. Every stroke is driven through
+ * the same CutoutPaint.stroke() the finger calls, in fraction coordinates.
+ *
+ * The cases are the ones a person would actually reach for the brush to fix,
+ * plus the invariants that must hold no matter what they paint.
+ */
+const CASES = [
+  { id: "j1", cat: "jackets", file: "../assets/navy_denim_jacket.jpg" },
+  { id: "d1", cat: "dresses", file: "../assets/floral_white_dress.jpg" }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+/** The raw photo at the working frame's size, as the draw brush's colour source. */
+function rawAt(img, w, h) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d", { willReadFrequently: true });
+  c.drawImage(img, 0, 0, w, h);
+  return c.getImageData(0, 0, w, h).data;
+}
+
+function checker(ctx, x, y, w, h, size, a, b) {
+  for (let yy = 0; yy < h; yy += size) {
+    for (let xx = 0; xx < w; xx += size) {
+      ctx.fillStyle = ((xx / size | 0) + (yy / size | 0)) % 2 ? a : b;
+      ctx.fillRect(x + xx, y + yy, Math.min(size, w - xx), Math.min(size, h - yy));
+    }
+  }
+}
+
+function alphaSum(a) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; return s; }
+
+(async function () {
+  const report = { cases: [], checks: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  const check = (name, pass, detail) => {
+    report.checks.push({ name, pass: !!pass, detail: detail === undefined ? "" : String(detail) });
+    say();
+  };
+
+  try {
+    const PW = 260, PH = 300, PANELS = 5;
+    const sheet = document.createElement("canvas");
+    sheet.width = PANELS * PW;
+    sheet.height = CASES.length * PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const cse = CASES[i];
+      const entry = { id: cse.id };
+      const img = await load(cse.file);
+
+      const cut = await GarmentCutout.extract(img, { category: cse.cat, keepWorking: true });
+      if (!cut.working) throw new Error("keepWorking did not return a working frame");
+      const W = cut.working.w, H = cut.working.h;
+      entry.frame = W + "x" + H;
+
+      const raw = rawAt(img, W, H);
+      const layer = CutoutPaint.create({
+        w: W, h: H,
+        baseAlpha: cut.working.alpha,
+        baseRgba: cut.working.rgba,
+        rawRgba: raw
+      });
+      entry.radius = layer.radius;
+
+      const before = CutoutPaint.render(layer);
+      const baseSum = alphaSum(before.alpha);
+      entry.baseAlphaSum = Math.round(baseSum);
+      if (i === 0) check("a fresh layer is not dirty", before.dirty === false, before.dirty);
+
+      // ERASE: take a bite out of the middle of the garment
+      CutoutPaint.stroke(layer, "erase", [[0.44, 0.42], [0.56, 0.42]], { radius: 22 });
+      const erased = CutoutPaint.render(layer);
+      const erasedSum = alphaSum(erased.alpha);
+      entry.afterErase = Math.round(erasedSum);
+      if (i === 0) {
+        check("erase removes alpha", erasedSum < baseSum - 500, Math.round(baseSum - erasedSum));
+        check("erase marks the layer dirty", erased.dirty === true);
+      }
+
+      // UNDO must restore the base exactly, pixel for pixel
+      CutoutPaint.undo(layer);
+      const undone = CutoutPaint.render(layer);
+      let maxDelta = 0;
+      for (let p = 0; p < undone.alpha.length; p++) {
+        const d = Math.abs(undone.alpha[p] - cut.working.alpha[p]);
+        if (d > maxDelta) maxDelta = d;
+      }
+      if (i === 0) check("undo restores the base alpha exactly", maxDelta === 0, maxDelta);
+
+      // DRAW: paint back OUTSIDE the garment, where the photo has content
+      CutoutPaint.stroke(layer, "draw", [[0.06, 0.50], [0.16, 0.50]], { radius: 20 });
+      const drawn = CutoutPaint.render(layer);
+      entry.afterDraw = Math.round(alphaSum(drawn.alpha));
+      if (i === 0) check("draw adds alpha", alphaSum(drawn.alpha) > baseSum + 300,
+                         Math.round(alphaSum(drawn.alpha) - baseSum));
+
+      // LOCALITY: a stroke may not change a single pixel outside its footprint
+      const strokeOut = CutoutPaint._internals.replay(layer, layer.strokes);
+      let leaked = 0;
+      const grown = CutoutPaint._internals.dilate1(strokeOut.footprint, W, H);
+      for (let p = 0; p < drawn.alpha.length; p++) {
+        if (grown[p]) continue;
+        if (Math.abs(drawn.alpha[p] - cut.working.alpha[p]) > 0) leaked++;
+      }
+      if (i === 0) check("no pixel outside the footprint changed", leaked === 0, leaked);
+
+      // FILL: erase a block inside the garment, then fill it back from surroundings
+      const fillLayer = CutoutPaint.create({
+        w: W, h: H, baseAlpha: cut.working.alpha, baseRgba: cut.working.rgba, rawRgba: raw
+      });
+      CutoutPaint.stroke(fillLayer, "erase", [[0.46, 0.46], [0.54, 0.46]], { radius: 26 });
+      CutoutPaint.stroke(fillLayer, "fill", [[0.46, 0.46], [0.54, 0.46]], { radius: 26 });
+      const filled = CutoutPaint.render(fillLayer);
+      entry.afterFill = Math.round(alphaSum(filled.alpha));
+      if (i === 0) {
+        check("fill restores the alpha it filled",
+              Math.abs(alphaSum(filled.alpha) - baseSum) < baseSum * 0.02,
+              Math.round(alphaSum(filled.alpha) - baseSum));
+        // the filled patch must be fabric-coloured, not backdrop white
+        const fc = filled.canvas.getContext("2d", { willReadFrequently: true });
+        const mid = fc.getImageData(Math.round(0.50 * W), Math.round(0.46 * H), 1, 1).data;
+        entry.filledPixel = [mid[0], mid[1], mid[2], mid[3]];
+        check("the filled patch is not backdrop white",
+              !(mid[0] > 225 && mid[1] > 225 && mid[2] > 225), entry.filledPixel.join(","));
+      }
+
+      // TIMING: the fill is the only expensive operation here, and it runs
+      // synchronously inside a mouseup handler, so a slow one is a frozen tab
+      if (i === 0) {
+        const stress = CutoutPaint.create({
+          w: W, h: H, baseAlpha: cut.working.alpha, baseRgba: cut.working.rgba, rawRgba: raw
+        });
+        const t0 = performance.now();
+        CutoutPaint.stroke(stress, "fill", [[0.45, 0.45], [0.55, 0.45]], { radius: 27 });
+        CutoutPaint.render(stress);
+        entry.fillMs = Math.round(performance.now() - t0);
+        const t1 = performance.now();
+        CutoutPaint.stroke(stress, "fill", [[0.25, 0.30], [0.75, 0.70]], { radius: 60 });
+        CutoutPaint.render(stress);
+        entry.bigFillMs = Math.round(performance.now() - t1);
+        check("a fill on a typical stroke is fast enough for a mouseup handler",
+              entry.fillMs < 2000, entry.fillMs + "ms");
+        check("a fill on a very large stroke still finishes",
+              entry.bigFillMs < 8000, entry.bigFillMs + "ms");
+      }
+
+      // COMMIT: the shape the rest of the app expects
+      const done = CutoutPaint.commit(fillLayer, 512);
+      entry.commit = done.empty ? "empty" : done.width + "x" + done.height;
+      if (i === 0) {
+        check("commit returns a canvas and bounds", !done.empty && !!done.canvas && !!done.bounds);
+      }
+
+      // an over-erased garment must report empty rather than throw
+      const wipe = CutoutPaint.create({
+        w: W, h: H, baseAlpha: cut.working.alpha, baseRgba: cut.working.rgba, rawRgba: raw
+      });
+      CutoutPaint.stroke(wipe, "erase", [[0.5, 0.5]], { radius: Math.max(W, H) });
+      const wiped = CutoutPaint.commit(wipe, 512);
+      if (i === 0) check("erasing everything reports empty", wiped.empty === true, wiped.empty);
+
+      // ---- render the row
+      const y = i * PH + 16;
+      const label = (k, name) => {
+        sc.fillStyle = "#8ad"; sc.font = "11px monospace";
+        sc.fillText((k === 0 ? cse.id + "  " : "") + name, k * PW + 4, i * PH + 12);
+      };
+      const draw = (k, source) => {
+        if (!source) return;
+        const s = Math.min(PW / source.width, (PH - 22) / source.height);
+        sc.drawImage(source, k * PW + (PW - source.width * s) / 2, y, source.width * s, source.height * s);
+      };
+      const bg = (k) => { checker(sc, k * PW, y, PW, PH - 22, 10, "#2a2a34", "#3a3a46"); };
+
+      bg(0); label(0, "extracted"); draw(0, before.canvas);
+      bg(1); label(1, "erase bite"); draw(1, CutoutPaint.render(
+        (() => { const L = CutoutPaint.create({ w: W, h: H, baseAlpha: cut.working.alpha,
+                    baseRgba: cut.working.rgba, rawRgba: raw });
+                 CutoutPaint.stroke(L, "erase", [[0.44, 0.42], [0.56, 0.42]], { radius: 22 });
+                 return L; })()).canvas);
+      bg(2); label(2, "draw back"); draw(2, drawn.canvas);
+      bg(3); label(3, "erased then filled"); draw(3, filled.canvas);
+      bg(4); label(4, "committed"); draw(4, done.canvas);
+
+      report.cases.push(entry);
+      say();
+    }
+
+    report.passed = report.checks.filter(c => c.pass).length;
+    report.failed = report.checks.filter(c => !c.pass).length;
+    await post("/save?name=module_paint.png", sheet.toDataURL("image/png"));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say();
+  }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

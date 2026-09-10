@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLM box probe</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+pre{white-space:pre-wrap}canvas{max-height:300px;margin:4px}</style></head>
+<body>
+<pre id="log">running…</pre>
+<div id="out"></div>
+<script src="../vlm-service.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+const CASES = [
+  "../assets/cream_retro_sneakers.jpg",
+  "../assets/white_ribbed_top.jpg",
+  "../assets/white_linen_blouse.jpg",
+  "../assets/floral_white_dress.jpg",
+  "../assets/sage_leather_handbag.jpg",
+  "../assets/black_ankle_boots.jpg",
+  "testset/dress_white_outdoor.jpg",
+  "testset/casual_tshirt_jeans.jpg"
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    report.status = await VlmService.status();
+    const COLS = 4, W = 300, H = 340;
+    const sheet = document.createElement("canvas");
+    sheet.width = COLS * W;
+    sheet.height = Math.ceil(CASES.length / COLS) * H;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const file = CASES[i];
+      const entry = { file: file.split("/").pop() };
+      let img = null;
+      try {
+        img = await load(file);
+        const t0 = performance.now();
+        const a = await VlmService.analyzeGarment(img);
+        entry.ms = Math.round(performance.now() - t0);
+        entry.label = a.label;
+        entry.category = a.category;
+        entry.colorName = a.colorName;
+        entry.material = a.material;
+        entry.sheer = a.sheer;
+        entry.onBody = a.onBody;
+        entry.clutter = a.clutter;
+        entry.region = a.region ? {
+          x: +a.region.x.toFixed(3), y: +a.region.y.toFixed(3),
+          w: +a.region.w.toFixed(3), h: +a.region.h.toFixed(3)
+        } : null;
+
+        // draw the photo with the returned box over it
+        const col = i % COLS, row = Math.floor(i / COLS);
+        const ox = col * W, oy = row * H + 18;
+        const s = Math.min(W / img.width, (H - 24) / img.height);
+        const dw = img.width * s, dh = img.height * s;
+        const dx = ox + (W - dw) / 2;
+        sc.drawImage(img, dx, oy, dw, dh);
+        if (a.region) {
+          sc.strokeStyle = "#ff2cc0";
+          sc.lineWidth = 2;
+          sc.strokeRect(dx + a.region.x * dw, oy + a.region.y * dh,
+                        a.region.w * dw, a.region.h * dh);
+        }
+        sc.fillStyle = "#fff";
+        sc.font = "12px monospace";
+        sc.fillText((a.category || "?") + " / " + (a.label || "?").slice(0, 26), ox + 4, row * H + 13);
+      } catch (e) {
+        entry.error = String(e && e.message || e);
+      }
+      report.cases.push(entry);
+      say();
+    }
+    await post("/save?name=vlm_boxes.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

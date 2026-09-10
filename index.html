@@ -1,0 +1,435 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pink Petal Closet — Digital Wardrobe & AI Stylist</title>
+  <meta name="description" content="Digitize your wardrobe, build vibe-based outfits from your own clothes, and have them rendered worn on a mannequin.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Hidden canvas for image processing -->
+  <canvas id="bg-removal-canvas" style="display:none;"></canvas>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- SVG Icon Sprites -->
+  <svg style="display:none;" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="icon-flower" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0 3-3zm0 14a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3zm-7-7a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3zm14 0a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3zm-7-2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z" fill="currentColor"/></symbol>
+    <symbol id="icon-shirt" viewBox="0 0 24 24"><path d="M18 2h-3l-1 2-1-2H9L8 4 7 2H4c-1.1 0-2 .9-2 2v6c0 1.1.9 2 2 2h2v8c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2v-8h2c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-4 8h-4V4h4v6z" fill="currentColor"/></symbol>
+    <symbol id="icon-sparkles" viewBox="0 0 24 24"><path d="M12 2l1.6 4.9L18.5 8l-4.9 1.6L12 14.5l-1.6-4.9-4.9-1.6 4.9-1.6L12 2zm6 12.5l.8 2.4 2.4.8-2.4.8-.8 2.4-.8-2.4-2.4-.8 2.4-.8.8-2.4z" fill="currentColor"/></symbol>
+    <symbol id="icon-heart" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" fill="currentColor"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/></symbol>
+    <symbol id="icon-lock" viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z" fill="currentColor"/></symbol>
+    <symbol id="icon-unlock" viewBox="0 0 24 24"><path d="M12 17c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v1h2V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10z" fill="currentColor"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" fill="currentColor"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z" fill="currentColor"/></symbol>
+    <symbol id="icon-clipboard" viewBox="0 0 24 24"><path d="M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 16H5V5h2v2h10V5h2v14z" fill="currentColor"/></symbol>
+    <symbol id="icon-crop" viewBox="0 0 24 24"><path d="M17 15h2V7c0-1.1-.9-2-2-2H9v2h8v8zM7 17V1H5v4H1v2h4v10c0 1.1.9 2 2 2h10v4h2v-4h4v-2H7z" fill="currentColor"/></symbol>
+    <symbol id="icon-wand" viewBox="0 0 24 24"><path d="M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2l1.4 2.5L5 7zm12 9.8L17 14l1.4 2.5L17 19l2.5-1.4L22 19l-1.4-2.5L22 14zM22 2l-2.5 1.4L17 2l1.4 2.5L17 7l2.5-1.4L22 7l-1.4-2.5zm-7.63 5.29c-.39-.39-1.02-.39-1.41 0L1.29 18.96c-.39.39-.39 1.02 0 1.41l2.34 2.34c.39.39 1.02.39 1.41 0L16.7 11.05c.39-.39.39-1.02 0-1.41l-2.33-2.35zm-1.06 3.47l-1.76-1.77 1.41-1.41 1.77 1.77-1.42 1.41z" fill="currentColor"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="currentColor"/></symbol>
+    <symbol id="icon-eraser" viewBox="0 0 24 24"><path d="M15.14 3.5c-.78-.78-2.05-.78-2.83 0L2.79 13.03c-.78.78-.78 2.05 0 2.83l4.24 4.24h5.66l8.52-8.52c.78-.78.78-2.05 0-2.83L15.14 3.5zM8.44 18.1l-4.24-4.24 5.66-5.66 4.24 4.25-5.66 5.65zM10 20h11v2H10v-2z" fill="currentColor"/></symbol>
+    <symbol id="icon-brush" viewBox="0 0 24 24"><path d="M7 14c-1.66 0-3 1.34-3 3 0 1.31-1.16 2-2 2 .92 1.22 2.49 2 4 2 2.21 0 4-1.79 4-4 0-1.66-1.34-3-3-3zm13.71-9.37l-1.34-1.34a1 1 0 0 0-1.41 0L9 12.25 11.75 15l8.96-8.96a1 1 0 0 0 0-1.41z" fill="currentColor"/></symbol>
+    <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62A7.95 7.95 0 0 1 12.5 11c3.54 0 6.55 2.31 7.6 5.5l2.37-.78A10 10 0 0 0 12.5 8z" fill="currentColor"/></symbol>
+    <symbol id="icon-minus" viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z" fill="currentColor"/></symbol>
+    <symbol id="icon-grid" viewBox="0 0 24 24"><path d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z" fill="currentColor"/></symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M12 5C7 5 2.7 8.1 1 12c1.7 3.9 6 7 11 7s9.3-3.1 11-7c-1.7-3.9-6-7-11-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" fill="currentColor"/></symbol>
+  </svg>
+
+  <div class="app-container">
+    <header class="app-header">
+      <div class="logo">
+        <svg class="header-flower" width="32" height="32"><use href="#icon-flower"></use></svg>
+        <h1>Pink Petal Closet</h1>
+      </div>
+      <div class="tagline">Your digital wardrobe & AI stylist agent</div>
+    </header>
+
+    <div class="simulation-dashboard">
+      <!-- LEFT: WEB DASHBOARD -->
+      <section class="web-panel shadow-card">
+        <div class="panel-header">
+          <span class="badge web-badge">Web Experience</span>
+          <h2>Boutique Dashboard</h2>
+        </div>
+        <div class="web-layout">
+          <nav class="web-sidebar">
+            <button class="nav-btn active" data-target="home"><svg class="nav-icon" width="20" height="20"><use href="#icon-flower"></use></svg><span>Home</span></button>
+            <button class="nav-btn" data-target="closet"><svg class="nav-icon" width="20" height="20"><use href="#icon-shirt"></use></svg><span>My Closet</span></button>
+            <button class="nav-btn" data-target="assistant"><svg class="nav-icon" width="20" height="20"><use href="#icon-sparkles"></use></svg><span>Outfit Assistant</span></button>
+            <button class="nav-btn" data-target="looks"><svg class="nav-icon" width="20" height="20"><use href="#icon-heart"></use></svg><span>My Looks</span></button>
+            <button class="nav-btn" data-target="add"><svg class="nav-icon" width="20" height="20"><use href="#icon-plus"></use></svg><span>Add Item</span></button>
+          </nav>
+
+          <main class="web-content">
+            <!-- HOME -->
+            <div id="web-sheet-home" class="content-sheet active">
+              <div class="welcome-banner"><h3>Welcome back, Fashionista 🌸</h3><p>Curating your personal aesthetics, one petal at a time.</p></div>
+              <div class="stats-row">
+                <div class="stat-card"><span class="stat-number" id="stats-total-items">0</span><span class="stat-label">Total Clothes</span></div>
+                <div class="stat-card"><span class="stat-number" id="stats-fav-items">0</span><span class="stat-label">Favorites</span></div>
+                <div class="stat-card"><span class="stat-number" id="stats-outfits">0</span><span class="stat-label">Outfits Crafted</span></div>
+              </div>
+              <div class="quick-links"><h4>Quick Actions</h4>
+                <div class="quick-buttons">
+                  <button class="btn btn-primary" onclick="switchTab('closet')">Walk Into My Closet</button>
+                  <button class="btn btn-secondary" onclick="switchTab('assistant')">Open Outfit Stylist</button>
+                  <button class="btn btn-secondary" onclick="switchTab('add')">Add an Item</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- CLOSET -->
+            <div id="web-sheet-closet" class="content-sheet">
+              <div class="closet-header"><h3>Boutique Catalog</h3><p>Filter and manage your digital wardrobe.</p></div>
+              <div class="filter-tabs" id="web-filter-tabs">
+                <button class="filter-btn active" data-category="all">All</button>
+                <button class="filter-btn" data-category="tops">Tops</button>
+                <button class="filter-btn" data-category="bottoms">Bottoms</button>
+                <button class="filter-btn" data-category="dresses">Dresses</button>
+                <button class="filter-btn" data-category="footwear">Footwear</button>
+                <button class="filter-btn" data-category="jackets">Jackets</button>
+                <button class="filter-btn" data-category="bags">Bags</button>
+                <button class="filter-btn" data-category="accessories">Accessories</button>
+              </div>
+              <!-- One image-generation call per garment, stored for good. Only
+                   offered for garments the fit is straining on: a clean product
+                   shot already has body shape and gains nothing. -->
+              <div class="closet-aifit-bar" id="closet-aifit-bar" style="display:none;">
+                <span class="aifit-label">✨ AI fit</span>
+                <span class="aifit-copy">Re-photographs a garment as worn, so it sits on the mannequin properly instead of being stretched. One call per garment, kept for ever.</span>
+                <button class="btn btn-secondary btn-small" id="btn-aifit-needed" type="button">Fit what needs it</button>
+                <span class="aifit-state" id="aifit-state"></span>
+              </div>
+              <div class="closet-grid" id="web-closet-grid"></div>
+            </div>
+
+            <!-- MY LOOKS -->
+            <div id="web-sheet-looks" class="content-sheet">
+              <div class="closet-header">
+                <h3>My Looks</h3>
+                <p>Outfits you saved. <strong>Wear this</strong> puts one back on the board so you can shuffle around it or render it.</p>
+              </div>
+              <p id="looks-empty" class="looks-empty" style="display:none;">
+                Nothing saved yet. Build an outfit in the Outfit Assistant and press
+                <strong>Save This Look</strong> — it will appear here, with the pieces it was made of.
+              </p>
+              <div class="looks-grid" id="looks-grid"></div>
+            </div>
+
+            <!-- ADD ITEM -->
+            <div id="web-sheet-add" class="content-sheet">
+              <!-- No Paste button here. The dropzone below already says "or press
+                   Ctrl+V", and a page-wide paste listener already catches it wherever
+                   the cursor is — so the button was a third way to reach a thing that
+                   already has two, and the one that looked most like work. -->
+              <div class="add-header-row">
+                <div class="add-header">
+                  <h3>Add a Garment</h3>
+                  <p>Drop in any clothing photo &mdash; a shop screenshot, a flat lay, or a picture of someone wearing it. The garment is cut out for you: background gone, model gone.</p>
+                </div>
+              </div>
+
+              <!-- Universal Garment Focus Selector -->
+              <div class="extraction-mode-bar" id="extraction-mode-bar">
+                <span class="mode-label">AI Focus Mode:</span>
+                <button class="btn-mode-pill active" data-mode="top" type="button">👚 Top / Shirt</button>
+                <button class="btn-mode-pill" data-mode="bottom" type="button">👖 Bottoms / Pants</button>
+                <button class="btn-mode-pill" data-mode="dress" type="button">👗 Dress</button>
+                <button class="btn-mode-pill" data-mode="jacket" type="button">🧥 Jacket / Coat</button>
+                <button class="btn-mode-pill" data-mode="footwear" type="button">👟 Shoes / Boots</button>
+                <button class="btn-mode-pill" data-mode="bag" type="button">👜 Bag</button>
+                <button class="btn-mode-pill" data-mode="accessories" type="button">💍 Accessory</button>
+                <button class="btn-mode-pill" data-mode="full" type="button">✨ Full Garment</button>
+              </div>
+
+              <div class="add-split">
+                <div class="upload-dropzone" id="add-dropzone" tabindex="0">
+                  <div class="dropzone-prompt">
+                    <svg class="upload-cloud" viewBox="0 0 24 24" width="48" height="48"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z" fill="currentColor"/></svg>
+                    <p class="primary-text">Click or drag &amp; drop any garment photo here</p>
+                    <p class="secondary-text">Or press <kbd class="kbd-badge">Ctrl + V</kbd> anywhere to paste screenshot</p>
+                    <div class="paste-hint-pill">✨ Universal AI Extraction for Tops, Pants, Dresses, Jackets &amp; Shoes</div>
+                  </div>
+                  <!-- A plain circular ring, deliberately. The sweeping-scan
+                       version that was here was not liked, and the isolation is
+                       usually over in a second or two — a wait that short wants
+                       a spinner, not a story. `aspect-ratio` and the explicit
+                       flex-basis are what keep it round: as a flex item with a
+                       percentage radius it was being stretched into an oval. -->
+                  <div class="dropzone-loading" id="dropzone-loader" style="display:none;">
+                    <div class="ring-loader" aria-hidden="true"></div>
+                    <p id="loader-status">AI extracting garment...</p>
+                    <span class="sub-loader-status" id="loader-substatus">Removing model, skin &amp; background</span>
+                  </div>
+                  <div class="dropzone-preview" id="dropzone-preview" style="display:none;">
+                    <div class="preview-img-container">
+                      <img id="preview-img" src="" alt="Extracted Garment">
+                    </div>
+                    <div class="bg-removal-badge" id="extraction-badge">✨ Garment Isolated</div>
+                    <div class="preview-actions">
+                      <button class="btn btn-tiny btn-secondary" id="btn-crop-tool" type="button" title="Choose a different garment, or erase and paint back by hand">
+                        <svg class="btn-icon" width="13" height="13"><use href="#icon-brush"></use></svg> ✂️ Edit Cutout
+                      </button>
+                      <button class="btn btn-tiny btn-secondary" id="btn-reupload" type="button">Remove</button>
+                    </div>
+                  </div>
+                  <input type="file" id="file-input" accept="image/*" style="display:none;">
+                </div>
+
+                <div class="item-form shadow-card">
+                  <div class="form-group"><label for="item-name">Garment Name</label><input type="text" id="item-name" placeholder="e.g. Terracotta Asymmetrical Top" class="form-control"></div>
+                  <div class="form-group"><label for="item-category">Category <span class="ai-tag">AI Auto-Detected</span></label>
+                    <select id="item-category" class="form-control">
+                      <option value="tops">Tops</option><option value="bottoms">Bottoms</option><option value="dresses">Dresses</option>
+                      <option value="jackets">Jackets &amp; Coats</option><option value="footwear">Footwear</option>
+                      <option value="bags">Bags</option><option value="accessories_necklace">Necklace</option>
+                      <option value="accessories_bracelet">Bracelet</option><option value="accessories_headwear">Headwear</option>
+                    </select>
+                  </div>
+                  <div class="form-group"><label for="item-color">Dominant Color <span class="ai-tag">AI Detected</span></label>
+                    <div class="color-row"><input type="color" id="item-color" value="#C86446" class="color-picker"><input type="text" id="item-color-name" placeholder="e.g. Terracotta" class="form-control"></div>
+                  </div>
+                  <div class="form-group"><label for="item-tags">Style Tags <span class="ai-tag">AI Detected</span></label><input type="text" id="item-tags" placeholder="chic, autumn, ribbed, knit" class="form-control"></div>
+                  <div class="form-group-checkbox"><input type="checkbox" id="item-favorite" checked><label for="item-favorite">Mark as Favorite</label></div>
+                  <button class="btn btn-primary btn-block" id="btn-save-item">Hang in Closet</button>
+                </div>
+              </div>
+
+              <div class="demo-uploads"><h4>Test with Sample Garments across all categories:</h4>
+                <div class="demo-grid">
+                  <button class="demo-card-btn" data-preset="preset_terracotta_top"><span class="emoji">👚</span> Rust Ribbed Top</button>
+                  <button class="demo-card-btn" data-preset="preset_pink_top"><span class="emoji">👚</span> Pink Cable Top</button>
+                  <button class="demo-card-btn" data-preset="preset_sage_skirt"><span class="emoji">👖</span> Sage Skirt</button>
+                  <button class="demo-card-btn" data-preset="preset_floral_dress"><span class="emoji">👗</span> Floral Dress</button>
+                  <button class="demo-card-btn" data-preset="preset_red_dress"><span class="emoji">👗</span> Burgundy Dress</button>
+                  <button class="demo-card-btn" data-preset="preset_sneakers"><span class="emoji">👟</span> Cream Sneakers</button>
+                  <button class="demo-card-btn" data-preset="preset_lavender_top"><span class="emoji">👚</span> Lavender Crop</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- OUTFIT ASSISTANT -->
+            <div id="web-sheet-assistant" class="content-sheet">
+              <div class="assistant-header"><h3>Outfit Assistant</h3><p>Describe your vibe and the stylist picks pieces from your own closet. They are laid out as you photographed them — press <strong>See It Worn</strong> to have the outfit rendered on a mannequin.</p></div>
+              <div class="assistant-workspace">
+                <!-- Controls -->
+                <div class="assistant-controls shadow-card">
+                  <div class="form-group"><label for="stylist-prompt">Where are we going today?</label>
+                    <textarea id="stylist-prompt" rows="3" placeholder="e.g. 'autumn dinner date', 'casual coffee', 'party celebration', 'office presentation'" class="form-control"></textarea>
+                  </div>
+                  <div class="stylist-options">
+                    <button class="btn btn-primary btn-block" id="btn-generate-outfit"><svg class="btn-icon" width="16" height="16"><use href="#icon-sparkles"></use></svg> Generate Outfit</button>
+                    <button class="btn btn-secondary btn-block" id="btn-shuffle-unlocked"><svg class="btn-icon" width="16" height="16"><use href="#icon-refresh"></use></svg> Shuffle Unlocked</button>
+                  </div>
+                  <div class="manual-selector-section"><h4>Style Around an Item</h4><p class="subtext">Pick a garment to build the outfit around.</p>
+                    <button class="btn btn-small btn-secondary btn-block" id="btn-trigger-manual-select">Select Base Item</button>
+                    <div class="selected-base-display" id="selected-base-display" style="display:none;"><span class="label">Styling around:</span>
+                      <div class="selected-base-item"><span id="base-item-emoji">👚</span><span class="name" id="base-item-name">Item</span><button class="btn-remove" id="btn-clear-base">&times;</button></div>
+                      <button class="btn btn-small btn-primary btn-block" id="btn-shuffle-around" style="margin-top:8px;">
+                        <svg class="btn-icon" width="14" height="14"><use href="#icon-refresh"></use></svg> Shuffle the Rest
+                      </button>
+                      <p class="subtext" id="style-around-hint">Keeps this piece and swaps everything else.</p>
+                    </div>
+                  </div>
+                  <!-- Slot lock/remove controls -->
+                  <div class="slot-controls-list" id="slot-controls-list"></div>
+                </div>
+
+                <!-- Mannequin + Items Panel -->
+                <div class="outfit-display shadow-card">
+                  <div class="outfit-vibe-header"><h4>Current Look</h4><span class="vibe-tag" id="current-vibe-label">Neutral Vibe</span></div>
+                  <!-- THE OUTFIT PICTURE: a flat display of the chosen pieces, or an AI render -->
+                  <div class="mannequin-showcase" id="mannequin-showcase">
+                    <!-- No src: the pre-render view is a flat display of the chosen pieces, drawn
+                         into this element as a data URL. A poster of the bare mannequin here
+                         would flash a body the picture is deliberately not about. -->
+                    <img id="mannequin-render" alt="The pieces in this outfit" class="mannequin-img">
+                    <!-- A wait of ten to thirty seconds, so it gets a mannequin
+                         being dressed rather than a spinning ring: a silhouette
+                         with a light sweeping down it, and a line of text that
+                         says which part of the work is happening. -->
+                    <div class="mannequin-loading" id="mannequin-loading" style="display:none;">
+                      <div class="dress-loader" aria-hidden="true">
+                        <svg viewBox="0 0 64 96" class="dress-loader-figure">
+                          <defs>
+                            <linearGradient id="sweepGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stop-color="#fff" stop-opacity="0"/>
+                              <stop offset="50%" stop-color="#fff" stop-opacity="0.85"/>
+                              <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+                            </linearGradient>
+                            <clipPath id="figureClip">
+                              <path d="M32 6a7 7 0 0 1 7 7c0 4-2 6-2 8l10 5c4 2 5 5 5 9v18c0 3-2 5-5 5h-1l2 24c0 3-2 4-5 4H21c-3 0-5-1-5-4l2-24h-1c-3 0-5-2-5-5V35c0-4 1-7 5-9l10-5c0-2-2-4-2-8a7 7 0 0 1 7-7z"/>
+                            </clipPath>
+                          </defs>
+                          <path class="dress-loader-body"
+                                d="M32 6a7 7 0 0 1 7 7c0 4-2 6-2 8l10 5c4 2 5 5 5 9v18c0 3-2 5-5 5h-1l2 24c0 3-2 4-5 4H21c-3 0-5-1-5-4l2-24h-1c-3 0-5-2-5-5V35c0-4 1-7 5-9l10-5c0-2-2-4-2-8a7 7 0 0 1 7-7z"/>
+                          <g clip-path="url(#figureClip)">
+                            <rect class="dress-loader-sweep" x="0" y="-40" width="64" height="40" fill="url(#sweepGrad)"/>
+                          </g>
+                        </svg>
+                        <div class="dress-loader-track"><span></span></div>
+                      </div>
+                      <p id="mannequin-loading-text">Gathering the pieces...</p>
+                    </div>
+                  </div>
+                  <p class="mannequin-caption" id="mannequin-caption"></p>
+                  <!-- The "auto" checkbox is gone. It rendered every new look the
+                       moment it appeared, and since each render is a paid call it
+                       turned browsing and shuffling into spending — a setting whose
+                       best use was leaving it alone. Rendering is now always a
+                       deliberate press. -->
+                  <!-- The two things you can do with the look on screen, side by
+                       side: see it worn, or keep it. They used to sit at opposite
+                       ends of the panel with the item list in between, which read
+                       as two unrelated features rather than a pair of choices. -->
+                  <div class="look-actions-bar">
+                    <button class="btn btn-secondary btn-small" id="btn-ai-tryon" type="button"
+                            style="display:none;" title="Have this outfit rendered worn on the mannequin">
+                      <svg class="btn-icon btn-icon-lg" width="18" height="18"><use href="#icon-sparkles"></use></svg>
+                      <span class="btn-label">See It Worn</span>
+                    </button>
+                    <button class="btn btn-secondary btn-small" id="btn-save-outfit" type="button">
+                      <svg class="btn-icon btn-icon-lg" width="17" height="17"><use href="#icon-heart"></use></svg>
+                      <span class="btn-label">Save This Look</span>
+                    </button>
+                    <!-- Only while a render is on screen. Re-rendering is a paid
+                         call, and it used to sit under the same press that had
+                         just been free — so it now has a control of its own that
+                         you have to aim at. -->
+                    <button class="btn btn-secondary btn-icon-only" id="btn-ai-rerender" type="button"
+                            style="display:none;" title="Render this look again (another paid call)">
+                      <svg width="15" height="15"><use href="#icon-refresh"></use></svg>
+                    </button>
+                  </div>
+                  <span class="tryon-status" id="tryon-status"></span>
+                  <!-- Individual Item Breakdown -->
+                  <div class="outfit-items-breakdown" id="outfit-items-breakdown"></div>
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      </section>
+
+      <!-- RIGHT: MOBILE SIMULATOR -->
+      <section class="mobile-panel">
+        <div class="panel-header"><span class="badge mobile-badge">Mobile Experience</span><h2>iPhone Simulator</h2></div>
+        <div class="iphone-frame">
+          <div class="iphone-notch"><div class="speaker"></div><div class="camera"></div></div>
+          <div class="iphone-screen">
+            <div class="mobile-app">
+              <header class="mobile-header"><div class="m-logo"><svg class="m-flower" width="18" height="18"><use href="#icon-flower"></use></svg><span>Pink Petal Closet</span></div><div class="m-active-sheet-name" id="mobile-title">Home</div></header>
+              <div class="mobile-body" id="mobile-body-container"></div>
+              <nav class="mobile-nav">
+                <button class="m-nav-btn active" data-target="home"><svg class="m-nav-icon" width="18" height="18"><use href="#icon-flower"></use></svg><span class="m-nav-label">Home</span></button>
+                <button class="m-nav-btn" data-target="closet"><svg class="m-nav-icon" width="18" height="18"><use href="#icon-shirt"></use></svg><span class="m-nav-label">Closet</span></button>
+                <button class="m-nav-btn" data-target="assistant"><svg class="m-nav-icon" width="18" height="18"><use href="#icon-sparkles"></use></svg><span class="m-nav-label">Stylist</span></button>
+                <button class="m-nav-btn" data-target="looks"><svg class="m-nav-icon" width="18" height="18"><use href="#icon-heart"></use></svg><span class="m-nav-label">Looks</span></button>
+                <button class="m-nav-btn" data-target="add"><svg class="m-nav-icon" width="18" height="18"><use href="#icon-plus"></use></svg><span class="m-nav-label">Add</span></button>
+              </nav>
+            </div>
+          </div>
+          <div class="iphone-home-bar"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Modal for Manual Item Select -->
+  <div class="modal" id="manual-select-modal" style="display:none;">
+    <div class="modal-content shadow-card">
+      <div class="modal-header"><h4>Choose Item to Style Around</h4><button class="close-btn" id="btn-close-modal">&times;</button></div>
+      <div class="modal-body"><div class="modal-grid" id="modal-items-grid"></div></div>
+    </div>
+  </div>
+
+  <!-- Precision Cutout & Crop Studio Modal -->
+  <div class="modal" id="crop-modal" style="display:none;">
+    <div class="modal-content shadow-card crop-modal-content">
+      <div class="modal-header">
+        <h4>✂️ Cutout Editor</h4>
+        <button class="close-btn" id="btn-close-crop">&times;</button>
+      </div>
+      <div class="modal-body crop-modal-body">
+        <p class="crop-instructions">
+          Tap the garment in the photo to isolate just that piece - or drag a box around it.
+          Then use <strong>Retouch</strong> below to erase what is not the garment, or paint back what was missed.
+        </p>
+        <div class="crop-preset-toolbar">
+          <button class="btn-tool-pill active" id="tool-top-preset" type="button">👚 Top</button>
+          <button class="btn-tool-pill" id="tool-bottom-preset" type="button">👖 Bottoms</button>
+          <button class="btn-tool-pill" id="tool-dress-preset" type="button">👗 Dress</button>
+          <button class="btn-tool-pill" id="tool-jacket-preset" type="button">🧥 Jacket</button>
+          <button class="btn-tool-pill" id="tool-shoes-preset" type="button">👟 Footwear</button>
+          <button class="btn-tool-pill" id="tool-custom-box" type="button">📦 Custom Drag Box</button>
+        </div>
+
+        <!-- Retouch: fix by hand what the automatic pass got wrong. Erase takes
+             fabric away; Draw Back returns the photograph's own pixels; Fill In
+             invents fabric from the garment around the gap, for where the photo
+             never had any. -->
+        <div class="crop-paint-toolbar" id="crop-paint-toolbar">
+          <span class="paint-toolbar-label">Retouch:</span>
+          <button class="btn-tool-pill btn-paint" id="tool-paint-erase" type="button" title="Erase what is not the garment">
+            <svg width="13" height="13"><use href="#icon-eraser"></use></svg> Erase
+          </button>
+          <button class="btn-tool-pill btn-paint" id="tool-paint-draw" type="button" title="Paint back fabric using the photo's own pixels">
+            <svg width="13" height="13"><use href="#icon-brush"></use></svg> Draw Back
+          </button>
+          <button class="btn-tool-pill btn-paint" id="tool-paint-fill" type="button" title="Invent fabric from the garment around the gap">
+            <svg width="13" height="13"><use href="#icon-sparkles"></use></svg> Fill In
+          </button>
+          <label class="paint-size-label" for="paint-brush-size">Size
+            <input type="range" id="paint-brush-size" min="4" max="90" value="27" step="1">
+          </label>
+          <button class="btn-tool-pill btn-paint-plain" id="tool-paint-undo" type="button" title="Undo the last stroke">
+            <svg width="13" height="13"><use href="#icon-undo"></use></svg> Undo
+          </button>
+          <label class="paint-ghost-label" title="Show the photo faintly under the cutout, so you can see whether there is fabric to paint back">
+            <input type="checkbox" id="paint-ghost" checked> Show photo underneath
+          </label>
+        </div>
+
+        <div class="crop-studio-stage">
+          <div class="crop-canvas-wrapper" id="crop-canvas-wrapper">
+            <canvas id="crop-canvas"></canvas>
+            <div id="crop-box" class="crop-box" style="display:none;">
+              <span class="crop-handle"></span>
+            </div>
+          </div>
+          <div class="studio-selection-panel">
+            <span class="studio-selection-label">Isolated garment</span>
+            <img id="studio-preview-img" alt="Isolated garment preview" style="display:none;">
+            <p id="studio-status">Tap the garment you want, or drag a box around it.</p>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer crop-modal-footer">
+        <button class="btn btn-secondary btn-small" id="btn-crop-reset">Full Photo</button>
+        <button class="btn btn-primary btn-small" id="btn-crop-apply">✨ Apply Extraction</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- one problem per file: segmentation, cutout, body, fit, layering -->
+  <script src="modules/seg-watershed.js"></script>
+  <script src="modules/garment-cutout.js"></script>
+  <script src="modules/cutout-paint.js"></script>
+  <script src="modules/body-model.js"></script>
+  <script src="modules/garment-straighten.js"></script>
+  <script src="modules/garment-fit.js"></script>
+  <script src="modules/outfit-compose.js"></script>
+  <script src="modules/outfit-display.js"></script>
+  <script src="modules/worn-render.js"></script>
+  <script src="garment-engine.js"></script>
+  <script src="vlm-service.js"></script>
+  <script src="tryon-service.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
+

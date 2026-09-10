@@ -1,0 +1,14 @@
+{
+  "name": "pink-petal-closet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Digital wardrobe and AI outfit stylist — static app plus a proxy that holds the API credential so the browser never sees it.",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}

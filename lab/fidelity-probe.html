@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>render fidelity</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}canvas{max-height:260px;border:1px solid #333;margin:4px}</style></head>
+<body><pre id="log">running…</pre><div id="shelf"></div>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../tryon-service.js"></script>
+<script src="../garment-engine.js"></script>
+<script src="../modules/worn-render.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * Two things, neither of which needs a paid call.
+ *
+ * 1. THE PROMPT. A model changed a floral dress's colour and length, so the
+ *    wording was rewritten. What can be checked without spending anything is
+ *    that the instruction actually says what it is supposed to say — that
+ *    fidelity leads and closes it, that colour and LENGTH are both named
+ *    (version 1 never mentioned length at all), that the rules are
+ *    prohibitions, and that a known colour is stated outright rather than
+ *    merely asked for.
+ *
+ * 2. THE CHECK BEHIND IT. A prompt is a request; the app now measures the
+ *    render against the wearer's own photograph and refuses to store one that
+ *    came back a different colour or length. That measurement is calibrated
+ *    here against a REAL pair — assets/red_cocktail_dress.jpg and the ghost
+ *    render made from it, which is faithful — and then against deliberately
+ *    spoiled versions of that same render, so both directions are proven: it
+ *    must pass the good render and catch the bad ones. A checker that only
+ *    ever says yes is not a checker.
+ */
+const SOURCE = "../assets/red_cocktail_dress.jpg";
+const GHOST = "generated/ghost_dress.png";
+
+const load = src => new Promise((ok, no) => {
+  const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error(src)); i.src = src;
+});
+
+/** Re-encode a cutout with its hue rotated: a recoloured render. */
+function recolour(cutout, degrees) {
+  const cv = document.createElement("canvas");
+  cv.width = cutout.width; cv.height = cutout.height;
+  const c = cv.getContext("2d", { willReadFrequently: true });
+  c.filter = "hue-rotate(" + degrees + "deg)";
+  c.drawImage(cutout.canvas, 0, 0);
+  return { canvas: cv, width: cv.width, height: cv.height };
+}
+
+/** Re-encode a cutout with its skirt cut off: a shortened render. */
+function shorten(cutout, keep) {
+  const h = Math.round(cutout.height * keep);
+  const cv = document.createElement("canvas");
+  cv.width = cutout.width; cv.height = h;
+  cv.getContext("2d", { willReadFrequently: true })
+    .drawImage(cutout.canvas, 0, 0, cutout.width, h, 0, 0, cutout.width, h);
+  return { canvas: cv, width: cv.width, height: h };
+}
+
+(async function () {
+  try {
+    check("the render module loaded", !!window.WornRender);
+
+    /* --------- 0. the colour phrase has to separate what the wardrobe's own
+       naming cannot. A golden-yellow dress is stored as "Amber" because the
+       wardrobe's table calls every saturated hue from 25 to 45 amber, and a
+       prompt repeating that label asked the model for an amber dress. So the
+       phrase used in prompts is derived from pixels AND has to be finer than
+       the label it replaced. --------- */
+    const phrase = (r, g, b) => window.TryOnService.colourPhrase(r, g, b);
+    report.phrases = {
+      goldenYellow: phrase(230, 180, 55),
+      amber: phrase(200, 128, 40),
+      yellow: phrase(236, 226, 70),
+      burgundy: phrase(114, 47, 55),
+      sage: phrase(160, 176, 150),
+      white: phrase(250, 250, 248),
+      black: phrase(18, 18, 20)
+    };
+    say("phrases " + JSON.stringify(report.phrases));
+    check("a golden-yellow garment is not described as amber",
+          /yellow/.test(report.phrases.goldenYellow) && !/amber/.test(report.phrases.goldenYellow),
+          report.phrases.goldenYellow);
+    check("...while an actually-amber one is",
+          /amber/.test(report.phrases.amber), report.phrases.amber);
+    check("and the wardrobe's own naming is exactly what confused the two",
+          window.GarmentEngine
+            ? window.GarmentEngine.describeColor(230, 180, 55).name === "Amber"
+            : true,
+          window.GarmentEngine
+            ? "describeColor(230,180,55) = " + window.GarmentEngine.describeColor(230, 180, 55).name
+            : "engine not loaded");
+    check("ordinary colours still come out sensibly",
+          /burgundy|red|wine|deep/.test(report.phrases.burgundy) &&
+          /white/.test(report.phrases.white) && /black/.test(report.phrases.black),
+          [report.phrases.burgundy, report.phrases.white, report.phrases.black].join(" / "));
+
+    /* ---------------- 1. the prompt says what it must ---------------- */
+    const p = window.WornRender.buildPrompt("dresses", "Floral Summer Dress",
+      { rgb: [230, 180, 55], phrase: phrase(230, 180, 55) });
+    report.promptChars = p.length;
+    await post("/save?name=prompt_ghost.txt", btoa(unescape(encodeURIComponent(p))));
+
+    const head = p.slice(0, 400), tail = p.slice(-400);
+    check("fidelity is the first thing the prompt says",
+          /NOT designing/.test(head) && /Reproduce it exactly/.test(head),
+          JSON.stringify(head.slice(0, 90)));
+    check("and the last thing it says",
+          /SAME garment/.test(tail) && /same length/.test(tail),
+          JSON.stringify(tail.slice(-90)));
+    check("LENGTH is named — version 1 never mentioned it at all",
+          /LENGTH:/.test(p) && /Do not shorten or lengthen/.test(p));
+    check("colour is named, and as a prohibition",
+          /COLOUR:/.test(p) && /Do not shift the/.test(p) && /saturate/.test(p));
+    check("prints are protected against substitution",
+          /PATTERN:/.test(p) && /Do not substitute another floral/.test(p));
+    check("the colour is stated as measured sRGB, which cannot contradict the image",
+          /sRGB\(230, 180, 55\)/.test(p),
+          (p.match(/sRGB\([^)]*\)/g) || []).join(" "));
+    check("the image is declared the authority over any wording",
+          /THE IMAGE IS THE AUTHORITY/.test(p) && /Match the pixels/.test(p));
+    check("the yellow-to-amber slide is forbidden by name",
+          /must not come back amber, gold, mustard or orange/.test(p.replace(/\s+/g, " ")));
+    check("colour-grading is forbidden too",
+          /do not colour-grade the picture/.test(p.replace(/\s+/g, " ")));
+    check("and it is told to check its own answer before returning it",
+          /compare your result with the attached image/.test(p.replace(/\s+/g, " ")));
+    const flat = p.replace(/\s+/g, " ");
+    check("restyling, improving and substituting are all forbidden",
+          /do not replace it with a similar garment/i.test(flat) &&
+          /make it more attractive/i.test(flat) &&
+          /do not redesign it, restyle it, modernise it/i.test(flat),
+          "checked against the flattened prompt");
+    check("the ghost-mannequin requirements survived the rewrite",
+          /GHOST MANNEQUIN/.test(p) && /NO mannequin/.test(p) &&
+          /pure white seamless/.test(p) && /hollow dark opening/.test(p));
+    check("the stored-render version was bumped, so old renders are stale",
+          window.WornRender.PROMPT_VERSION >= 2, window.WornRender.PROMPT_VERSION);
+
+    /* The whole-outfit prompt, which is what Render Outfit uses — and which is
+       the one that recoloured the yellow dress. Its colours are measured by
+       `render()` from the images it sends; here they are supplied directly so
+       the wording can be checked without a call. */
+    const q = window.TryOnService._buildPrompt([
+      { category: "dresses", name: "Amber Dress",
+        colour: { rgb: [230, 180, 55], phrase: phrase(230, 180, 55) } },
+      { category: "footwear", name: "Loafers",
+        colour: { rgb: [96, 62, 38], phrase: phrase(96, 62, 38) } }
+    ]);
+    report.outfitPromptChars = q.length;
+    await post("/save?name=prompt_outfit.txt", btoa(unescape(encodeURIComponent(q))));
+    const qf = q.replace(/\s+/g, " ");
+    check("the Render Outfit prompt leads with fidelity too",
+          /^TASK: dress a mannequin in garments that already exist/.test(q),
+          JSON.stringify(q.slice(0, 60)));
+    check("it names length, which it never used to",
+          /LENGTH:/.test(q) && /Do not shorten or lengthen/.test(q));
+    check("each garment carries its own measured sRGB",
+          /sRGB\(230, 180, 55\)/.test(q) && /sRGB\(96, 62, 38\)/.test(q),
+          (q.match(/sRGB\([^)]*\)/g) || []).join(" "));
+    check("a garment named 'Amber Dress' is still described by its pixels, not its name",
+          /golden yellow/.test(q) && !/its colour is amber/i.test(qf),
+          (q.match(/— [a-z ]+; reproduce/g) || []).join(" | "));
+    /* The item name is the last place a wrong colour word can still get in, and
+       in the reported case the item was literally called "Amber Dress". So the
+       prompt disowns the name rather than relying on the general rule. */
+    check("and the prompt is told to ignore a colour word in the item's name",
+          /a garment's NAME above is only a label its owner typed/i.test(qf) &&
+          /IGNORE that word/.test(qf) &&
+          /called "Amber Dress" whose measured colour is yellow is a YELLOW dress/.test(qf));
+    check("the images are declared the authority over the wording",
+          /THE IMAGES ARE THE AUTHORITY/.test(q) && /Match the pixels/.test(q));
+    check("the warm shop light is forbidden from tinting the garments",
+          /NO SCENE TINT/.test(q) && /warmly lit/.test(qf) &&
+          /keep the colour and change the light/.test(qf));
+    check("the yellow-to-amber slide is forbidden by name here too",
+          /a yellow garment must not come back amber, gold, mustard or orange/.test(qf));
+    check("and it is told to check each garment before returning",
+          /check each garment against its own image/.test(qf));
+    check("and it still protects the mannequin and the room",
+          /Keep image 1's mannequin/.test(q) && /Do not add a person/.test(q));
+
+    /* ---------------- 2. the check behind the prompt ---------------- */
+    const source = await window.GarmentCutout.extract(SOURCE, { category: "dresses", outputMaxDim: 640 });
+    const ghost = await window.GarmentCutout.extract(GHOST, { category: "dresses", outputMaxDim: 640 });
+    document.getElementById("shelf").appendChild(source.canvas);
+    document.getElementById("shelf").appendChild(ghost.canvas);
+
+    const good = window.WornRender.fidelity(source, ghost);
+    report.realPair = good;
+    say("real pair: " + JSON.stringify(good));
+    check("a faithful real render passes",
+          good.ok === true, "ΔE " + good.colourShift + ", length drift " + good.lengthDrift);
+    check("...and passes with room to spare, not by a whisker",
+          good.colourShift < window.WornRender.CONFIG.maxColourShift * 0.75 &&
+          Math.abs(good.lengthDrift) < window.WornRender.CONFIG.maxLengthDrift * 0.75,
+          "ΔE " + good.colourShift + " of " + window.WornRender.CONFIG.maxColourShift +
+          ", drift " + good.lengthDrift + " of " + window.WornRender.CONFIG.maxLengthDrift);
+
+    const spoiledColour = window.WornRender.fidelity(source, recolour(ghost, 90));
+    report.recoloured = spoiledColour;
+    check("a render that came back a different colour is caught",
+          spoiledColour.ok === false && /colour/.test(spoiledColour.why),
+          "ΔE " + spoiledColour.colourShift);
+
+    const spoiledLength = window.WornRender.fidelity(source, shorten(ghost, 0.62));
+    report.shortened = spoiledLength;
+    check("a render that came back shorter is caught",
+          spoiledLength.ok === false && /shorter/.test(spoiledLength.why),
+          "drift " + spoiledLength.lengthDrift);
+
+    /* A mild difference must NOT be refused: a render wrongly rejected costs a
+       call, and a checker that fires on ordinary sheen would reject every
+       render there is. */
+    const mild = window.WornRender.fidelity(source, recolour(ghost, 6));
+    report.mild = mild;
+    check("a slight difference in tone is accepted, not refused",
+          mild.ok === true, "ΔE " + mild.colourShift);
+
+    /* The length measure must survive a garment being filled out, which is the
+       one change a ghost render is FOR. Widening the middle without touching
+       the hem must not read as a length change. */
+    const filled = (() => {
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(ghost.width * 1.18); cv.height = ghost.height;
+      const c = cv.getContext("2d", { willReadFrequently: true });
+      const half = Math.round(ghost.height * 0.3);
+      c.drawImage(ghost.canvas, 0, 0, ghost.width, half,
+                  Math.round((cv.width - ghost.width) / 2), 0, ghost.width, half);
+      c.drawImage(ghost.canvas, 0, half, ghost.width, ghost.height - half,
+                  0, half, cv.width, ghost.height - half);
+      return { canvas: cv, width: cv.width, height: cv.height };
+    })();
+    document.getElementById("shelf").appendChild(filled.canvas);
+    const fill = window.WornRender.fidelity(source, filled);
+    report.filledOut = fill;
+    check("filling a garment out is not mistaken for shortening it",
+          fill.lengthDrift !== null && Math.abs(fill.lengthDrift) <= window.WornRender.CONFIG.maxLengthDrift,
+          "drift " + fill.lengthDrift + " (shoulder " + fill.before.shoulder +
+          " -> " + fill.after.shoulder + ")");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Do the api-core checks actually bite?</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * A mutation test for lab/apicore-probe.html.
+ *
+ * WHY. apicore-probe passed 80 of 80 on its first run. In this project that has
+ * twice meant the probe was measuring nothing — a suite that aborted while
+ * reporting success, and a width assertion that held because it compared 0 to
+ * 0. "It passed immediately" is evidence about the test, not only about the
+ * code, so each of the riskiest rules in api-core is broken here on purpose and
+ * the matching assertion is required to FAIL.
+ *
+ * The real file is never touched. Its source is fetched as text, altered in
+ * memory, and loaded into a private object by shadowing `window` inside a
+ * Function body — so the mutant and the genuine module coexist.
+ */
+const load = src => {
+  const fake = {};
+  new Function("window", "module", src + "\nreturn window.PPApiCore;")(fake, undefined);
+  return fake.PPApiCore;
+};
+
+const PAYLOAD = { prompt: "wear this", images: [{ mime: "image/png", data: "AAA" }] };
+const SNAKE = { candidates: [{ content: { parts: [
+  { inline_data: { mime_type: "image/png", data: "YYY" } } ] } }] };
+
+/* Each mutant: what to break, and the predicate that must stop holding.
+   The predicate is the same one apicore-probe asserts. */
+const MUTANTS = [
+  { name: "the Vertex aspect ratio is flipped to 16:9",
+    from: 'vertexAspect: "9:16"', to: 'vertexAspect: "16:9"',
+    holds: C => C.vertexBody(PAYLOAD, C.readEnv({ PP_VERTEX_PROJECT: "p", K_SERVICE: "s" }))
+                 .generationConfig.imageConfig.aspectRatio === "9:16" },
+
+  { name: "request images are sent as inlineData instead of inline_data",
+    from: "parts.push({ inline_data: { mime_type: img.mime, data: img.data } });",
+    to:   "parts.push({ inlineData: { mimeType: img.mime, data: img.data } });",
+    holds: C => C.vlmBody(PAYLOAD).contents[0].parts[1].inline_data.mime_type === "image/png" },
+
+  { name: "the '..' guard is removed from the static path",
+    from: 'if (seg === "..") return null;', to: 'if (seg === "..") { continue; }',
+    holds: C => C.safePath("/assets/../../etc/passwd.png") === null },
+
+  { name: "only camelCase is read back from the model",
+    from: "return part.inlineData || part.inline_data || null;",
+    to:   "return part.inlineData || null;",
+    holds: C => C.extractImage(SNAKE).image === "data:image/png;base64,YYY" },
+
+  { name: "the 'global' region keeps a host prefix",
+    from: 'cfg.vertexRegion === "global"', to: "false",
+    holds: C => C.vertexUri(C.readEnv({ PP_VERTEX_PROJECT: "p", PP_VERTEX_REGION: "global", K_SERVICE: "s" }))
+                 .indexOf("https://aiplatform.googleapis.com/v1/") === 0 },
+
+  { name: "the margin on a stated retry delay is dropped",
+    from: "Number(m[1]) + 2", to: "Number(m[1])",
+    holds: C => C.vlmRetry('{"error":{"status":"RESOURCE_EXHAUSTED"},"retryDelay":"27s"}', 0).seconds === 29 },
+
+  { name: "Cloud Run no longer counts as having a credential",
+    from: "const onCloudRun = !!env.K_SERVICE;", to: "const onCloudRun = false;",
+    holds: C => C.readEnv({ PP_VERTEX_PROJECT: "my-proj", K_SERVICE: "pink-petal-closet" }).useVertex === true },
+
+  { name: "the NUL-byte check is dropped",
+    from: "if (p.indexOf(String.fromCharCode(0)) >= 0) return null;", to: "",
+    holds: C => C.safePath("/index.html%00.png") === null },
+
+  { name: "the served-path allow-list is dropped",
+    from: "if (!MIME[ext]) return null;", to: "if (false) return null;",
+    holds: C => C.safePath("/server.ps1") === null && C.safePath("/form_answers.md") === null }
+];
+
+(async function () {
+  try {
+    const src = await fetch("../server/api-core.js").then(r => r.text());
+    const genuine = load(src);
+    check("the genuine module loads in isolation", !!genuine && !!genuine.safePath);
+
+    /* the control: on the real source, every predicate holds */
+    for (const m of MUTANTS) {
+      check("holds on the real source: " + m.name.replace(/^the |^only |^request /, ""),
+            m.holds(genuine) === true);
+    }
+
+    for (const m of MUTANTS) {
+      const mutated = src.split(m.from).join(m.to);
+      /* if the replacement did not match, the "mutant" is the original and the
+         next assertion would pass for the wrong reason — the exact trap this
+         file exists to catch, so it is checked rather than assumed */
+      check("mutation applied: " + m.name, mutated !== src,
+            mutated === src ? "PATTERN NOT FOUND: " + m.from : "source changed");
+      if (mutated === src) continue;
+
+      let held = null, threw = "";
+      try { held = m.holds(load(mutated)); }
+      catch (e) { threw = String(e.message || e); }
+
+      /* a mutant that throws is also caught — the probe would record a fatal */
+      check("caught: " + m.name, held !== true,
+            threw ? "threw: " + threw.slice(0, 80) : "predicate returned " + held);
+    }
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  say("\n" + report.passed + " passed, " + report.failed + " failed");
+  await post("/save?name=report.json",
+    btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+  await post("/done", "mutant");
+})();
+</script>
+</body></html>

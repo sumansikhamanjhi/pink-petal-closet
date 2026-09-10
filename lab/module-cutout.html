@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>module: garment-cutout</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Module 1 end to end: photo in, stored record out.
+ * Each row shows the cutout over BLACK and over a mid tone. A halo left by the
+ * backdrop is invisible on white and obvious on black, so both are needed.
+ * Boxes are hardcoded from the fixture run so no vision-model quota is spent.
+ */
+const CASES = [
+  { id: "d1", cat: "dresses",  file: "../assets/floral_white_dress.jpg",    region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  { id: "t6", cat: "tops",     file: "../assets/white_ribbed_top.jpg",      region: { x: 0.192, y: 0.123, w: 0.615, h: 0.733 } },
+  { id: "f1", cat: "footwear", file: "../assets/cream_retro_sneakers.jpg",  region: { x: 0.098, y: 0.251, w: 0.817, h: 0.541 } },
+  { id: "b1", cat: "bottoms",  file: "../assets/sage_pleated_skirt.jpg",    region: { x: 0.150, y: 0.090, w: 0.700, h: 0.860 } },
+  { id: "j1", cat: "jackets",  file: "../assets/navy_denim_jacket.jpg",     region: { x: 0.100, y: 0.120, w: 0.800, h: 0.760 } },
+  { id: "d2", cat: "dresses",  file: "../assets/red_cocktail_dress.jpg",    region: { x: 0.180, y: 0.080, w: 0.640, h: 0.870 } },
+  { id: "b3", cat: "bottoms",  file: "../assets/dark_skinny_jeans.jpg",     region: { x: 0.240, y: 0.070, w: 0.520, h: 0.880 } },
+  { id: "t3", cat: "tops",     file: "../assets/white_linen_blouse.jpg",    region: { x: 0.140, y: 0.110, w: 0.720, h: 0.790 } },
+  { id: "f2", cat: "footwear", file: "../assets/black_ankle_boots.jpg",     region: { x: 0.120, y: 0.140, w: 0.760, h: 0.740 } },
+  { id: "bg1", cat: "bags",    file: "../assets/sage_leather_handbag.jpg", region: { x: 0.150, y: 0.130, w: 0.700, h: 0.740 } }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+function checker(ctx, x, y, w, h, size, a, b) {
+  for (let yy = 0; yy < h; yy += size) {
+    for (let xx = 0; xx < w; xx += size) {
+      ctx.fillStyle = ((xx / size | 0) + (yy / size | 0)) % 2 ? a : b;
+      ctx.fillRect(x + xx, y + yy, Math.min(size, w - xx), Math.min(size, h - yy));
+    }
+  }
+}
+
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    const PW = 220, PH = 250, PANELS = 4;
+    const sheet = document.createElement("canvas");
+    sheet.width = PANELS * PW;
+    sheet.height = CASES.length * PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const cse = CASES[i];
+      const entry = { id: cse.id };
+      const img = await load(cse.file);
+      const cut = await GarmentCutout.extract(img, { region: cse.region, category: cse.cat });
+      entry.tau = cut.tau;
+      entry.plateau = cut.plateau;
+      entry.size = cut.width + "x" + cut.height;
+      entry.metrics = cut.metrics;
+      entry.cleanup = cut.cleanup;
+
+
+      // round-trip through storage, so what is measured is what would be stored
+      const record = GarmentCutout.toRecord(cut, { id: cse.id });
+      entry.kb = Math.round(record.image.length / 1024);
+      const back = await GarmentCutout.fromRecord(record);
+
+      const y = i * PH + 16;
+      const drawFitted = (px, source) => {
+        const s = Math.min(PW / source.width, (PH - 22) / source.height);
+        sc.drawImage(source, px + (PW - source.width * s) / 2, y, source.width * s, source.height * s);
+      };
+      const label = (k, name) => {
+        sc.fillStyle = "#8ad"; sc.font = "11px monospace";
+        sc.fillText((k === 0 ? cse.id + "  " : "") + name, k * PW + 4, i * PH + 12);
+      };
+
+      label(0, "source"); drawFitted(0, img);
+      sc.fillStyle = "#000"; sc.fillRect(PW, y, PW, PH - 22);
+      label(1, "on black"); drawFitted(PW, back.canvas);
+      sc.fillStyle = "#8e8e96"; sc.fillRect(2 * PW, y, PW, PH - 22);
+      label(2, "on mid grey"); drawFitted(2 * PW, back.canvas);
+      checker(sc, 3 * PW, y, PW, PH - 22, 10, "#2a2a34", "#3a3a46");
+      label(3, "alpha check"); drawFitted(3 * PW, back.canvas);
+
+      report.cases.push(entry);
+      say();
+    }
+    await post("/save?name=module_cutout.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

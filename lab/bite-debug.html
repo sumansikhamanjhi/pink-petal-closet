@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>bite debug</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}canvas{background:#333;margin:4px}</style></head>
+<body><pre id="log">…</pre><div id="shelf"></div>
+<script src="../garment-engine.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const SRC = "testset/dress_long_1997.jpg";
+
+function panel(w, h, paint) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  const img = ctx.createImageData(w, h);
+  paint(img.data);
+  ctx.putImageData(img, 0, 0);
+  document.getElementById("shelf").appendChild(cv);
+  return cv;
+}
+
+(async function () {
+  const report = {};
+  try {
+    await window.GarmentEngine.warmup();
+    const res = await window.GarmentEngine.extract(SRC,
+      { mode: "dress", background: "transparent", padding: 0, outputMaxDim: 720, debug: true });
+    const d = res._debug, w = d.w, h = d.h;
+    report.bites = d.bites;
+    report.metrics = res.metrics;
+    report.warnings = res.warnings;
+
+    let np = 0, nh = 0;
+    for (let p = 0; p < w * h; p++) { if (d.patch[p]) np++; if (d.hard[p]) nh++; }
+    report.patchPixels = np; report.hardPixels = nh;
+
+    // what the semantic parser thinks, where the patch is
+    let semHair = 0, semSkin = 0, semBg = 0, semCloth = 0;
+    for (let p = 0; p < w * h; p++) {
+      if (!d.patch[p]) continue;
+      if (d.sem.hair[p] > 0.5) semHair++;
+      if (d.sem.skin[p] > 0.5) semSkin++;
+      if (d.sem.bg[p] > 0.5) semBg++;
+      if (d.sem.clothes[p] > 0.5) semCloth++;
+    }
+    report.patchSemantics = { hair: semHair, skin: semSkin, bg: semBg, clothes: semCloth };
+
+    // alpha inside the patch: is any of it left partly transparent?
+    let aLow = 0, aMid = 0, aHigh = 0;
+    for (let p = 0; p < w * h; p++) {
+      if (!d.patch[p]) continue;
+      const a = d.alpha[p];
+      if (a < 0.05) aLow++; else if (a < 0.95) aMid++; else aHigh++;
+    }
+    report.patchAlpha = { transparent: aLow, partial: aMid, opaque: aHigh };
+
+    /* Is the paint the right colour? Compare the patch's own mean and spread
+       against the garment it is meant to be continuing. A repair that came out
+       as fabric sits near the garment mean with a small spread; one that
+       diffused in something else — background, an arm — is far off, or wildly
+       varied, and that difference is what tells the two apart without
+       squinting at a picture. */
+    const stat = (pick) => {
+      let n = 0, r = 0, g = 0, b = 0;
+      for (let p = 0; p < w * h; p++) {
+        if (!pick(p)) continue;
+        n++; r += d.rgb[p * 3]; g += d.rgb[p * 3 + 1]; b += d.rgb[p * 3 + 2];
+      }
+      if (!n) return null;
+      const mean = [r / n, g / n, b / n];
+      let dev = 0;
+      for (let p = 0; p < w * h; p++) {
+        if (!pick(p)) continue;
+        dev += Math.abs(d.rgb[p * 3] - mean[0]) + Math.abs(d.rgb[p * 3 + 1] - mean[1]) +
+               Math.abs(d.rgb[p * 3 + 2] - mean[2]);
+      }
+      return { n, mean: mean.map(v => Math.round(v)), spread: +(dev / (3 * n)).toFixed(1) };
+    };
+    /* The rim: the opaque pixels within 2px of the repair.
+       These are the only donors the diffusion has, and they are precisely the
+       pixels matting had to guess at — half fabric, half whatever was in
+       front. If their mean is what the repair came out as, the paint is
+       inheriting the occluder through the rim rather than from the garment. */
+    const near = window.GarmentEngine._internals.dilate(d.patch, w, h, 2);
+    report.rim = stat(p => near[p] && !d.patch[p] && d.alpha[p] > 0.9);
+    report.deepGarment = stat(p => d.alpha[p] > 0.9 && !near[p]);
+
+    report.garment = stat(p => d.alpha[p] > 0.9 && !d.patch[p]);
+    report.repaired = stat(p => d.patch[p]);
+    if (report.garment && report.repaired) {
+      report.colourGap = Math.round(
+        Math.abs(report.garment.mean[0] - report.repaired.mean[0]) +
+        Math.abs(report.garment.mean[1] - report.repaired.mean[1]) +
+        Math.abs(report.garment.mean[2] - report.repaired.mean[2]));
+    }
+
+    // where is the visible pattern? sample the brightest opaque pixels
+    const bright = [];
+    for (let p = 0; p < w * h; p++) {
+      if (d.alpha[p] < 0.9) continue;
+      const lum = 0.299 * d.rgb[p * 3] + 0.587 * d.rgb[p * 3 + 1] + 0.114 * d.rgb[p * 3 + 2];
+      if (lum > 90) bright.push({ x: p % w, y: (p - p % w) / w, lum: Math.round(lum), patch: !!d.patch[p] });
+    }
+    report.brightOpaque = bright.length;
+    report.brightInPatch = bright.filter(b => b.patch).length;
+    report.brightSample = bright.filter((_, i) => i % Math.max(1, Math.floor(bright.length / 12)) === 0).slice(0, 12);
+
+    // 0. where the light pixels are: yellow if inside the repair, cyan if not
+    const bmap = panel(w, h, dst => {
+      for (let p = 0; p < w * h; p++) {
+        const o = p * 4, al = d.alpha[p];
+        const lum = 0.299 * d.rgb[p * 3] + 0.587 * d.rgb[p * 3 + 1] + 0.114 * d.rgb[p * 3 + 2];
+        const hot = al > 0.9 && lum > 90;
+        dst[o] = hot ? 255 : al * 120;
+        dst[o + 1] = hot ? (d.patch[p] ? 230 : 60) : al * 120;
+        dst[o + 2] = hot ? (d.patch[p] ? 0 : 255) : al * 120;
+        dst[o + 3] = 255;
+      }
+    });
+    await post("/save?name=dbg_bright.png", bmap.toDataURL("image/png"));
+
+    // 1. the patch, in red, over the final alpha
+    const a = panel(w, h, dst => {
+      for (let p = 0; p < w * h; p++) {
+        const o = p * 4, al = d.alpha[p];
+        dst[o] = d.patch[p] ? 255 : al * 200;
+        dst[o + 1] = d.patch[p] ? 0 : al * 200;
+        dst[o + 2] = d.patch[p] ? 0 : al * 200;
+        dst[o + 3] = 255;
+      }
+    });
+    await post("/save?name=dbg_patch.png", a.toDataURL("image/png"));
+
+    // 2. the semantic classes, so the notch test can be judged
+    const b = panel(w, h, dst => {
+      for (let p = 0; p < w * h; p++) {
+        const o = p * 4;
+        dst[o] = d.sem.skin[p] > 0.5 ? 220 : (d.sem.hair[p] > 0.5 ? 120 : 0);
+        dst[o + 1] = d.sem.clothes[p] > 0.5 ? 200 : 0;
+        dst[o + 2] = d.sem.bg[p] > 0.5 ? 200 : 0;
+        dst[o + 3] = 255;
+      }
+    });
+    await post("/save?name=dbg_sem.png", b.toDataURL("image/png"));
+
+    // 3. hard mask after all repair
+    const c = panel(w, h, dst => {
+      for (let p = 0; p < w * h; p++) {
+        const o = p * 4, v = d.hard[p] ? 230 : 25;
+        dst[o] = dst[o + 1] = dst[o + 2] = v; dst[o + 3] = 255;
+      }
+    });
+    await post("/save?name=dbg_hard.png", c.toDataURL("image/png"));
+
+    await post("/save?name=dbg_cut.png", res.image);
+
+    /* The cutout over a flat grey.
+       Viewed as a bare PNG, a transparent bite and a badly-painted one look
+       alike — some viewers draw a checkerboard behind the alpha, which reads
+       as a patterned smear that was never there. Over one solid colour there
+       is no ambiguity: a hole is grey, a repair is fabric. */
+    const im = await new Promise((ok, no) => {
+      const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = res.image;
+    });
+    const flat = document.createElement("canvas");
+    flat.width = im.naturalWidth; flat.height = im.naturalHeight;
+    const fc = flat.getContext("2d");
+    fc.fillStyle = "#8a8a8a";
+    fc.fillRect(0, 0, flat.width, flat.height);
+    fc.drawImage(im, 0, 0);
+    document.getElementById("shelf").appendChild(flat);
+    await post("/save?name=dbg_on_grey.png", flat.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

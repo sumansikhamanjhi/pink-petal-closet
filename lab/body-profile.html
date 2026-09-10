@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Mannequin body profile</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace}
+canvas{max-height:640px;margin:6px}pre{white-space:pre-wrap}</style></head>
+<body>
+<div id="out"></div>
+<pre id="log">running…</pre>
+<script src="../garment-engine.js"></script>
+<script>
+const post = (u, b) => fetch(u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+(async function () {
+  const report = {};
+  try {
+    await GarmentEngine.warmup();
+    const img = await GarmentEngine._internals.loadImage("../assets/mannequin_base.jpg");
+    const canvas = GarmentEngine._internals.toCanvas(img, 768);
+    const W = canvas.width, H = canvas.height;
+    report.size = W + "x" + H;
+
+    // The bare mannequin reads as a body to the human-parsing model, so
+    // "not background" is the silhouette.
+    const r = await GarmentEngine.extract(canvas, { mode: "full", debug: true });
+    const sem = r._debug.sem;
+    const body = new Uint8Array(W * H);
+    for (let p = 0; p < W * H; p++) body[p] = sem.bg[p] < 0.5 ? 1 : 0;
+
+    // keep only the biggest blob — shop fittings in the background are not the body
+    const { labels, comps } = GarmentEngine._internals.components(body, W, H);
+    const biggest = comps.reduce((a, b) => (b.size > a.size ? b : a), { size: 0 });
+    for (let p = 0; p < W * H; p++) if (labels[p] !== biggest.id) body[p] = 0;
+    report.bodyFrac = +(biggest.size / (W * H)).toFixed(4);
+
+    // per-row extent of the body
+    const rows = [];
+    for (let y = 0; y < H; y++) {
+      let l = -1, rr = -1;
+      for (let x = 0; x < W; x++) if (body[y * W + x]) { if (l < 0) l = x; rr = x; }
+      rows.push(l < 0 ? null : [l / W, rr / W]);
+    }
+    let top = rows.findIndex(Boolean);
+    let bot = H - 1;
+    while (bot > 0 && !rows[bot]) bot--;
+    report.bodyTop = +(top / H).toFixed(4);
+    report.bodyBottom = +(bot / H).toFixed(4);
+
+    // resample to 48 bands so it can be baked into the app as a constant
+    const N = 48;
+    const profile = [];
+    for (let i = 0; i < N; i++) {
+      const y = Math.round(top + (bot - top) * (i / (N - 1)));
+      const row = rows[y];
+      profile.push(row ? [ +row[0].toFixed(3), +row[1].toFixed(3) ] : null);
+    }
+    report.profile = profile;
+    report.landmarks = {};
+    // widest point of the shoulders / hips, and the narrowest waist between them
+    const widthAt = i => { const p = profile[i]; return p ? p[1] - p[0] : 0; };
+    let shoulderI = 0, hipI = 0, waistI = 0;
+    for (let i = 2; i < N * 0.35; i++) if (widthAt(i) > widthAt(shoulderI)) shoulderI = i;
+    for (let i = Math.floor(N * 0.3); i < N * 0.55; i++) if (widthAt(i) > widthAt(hipI)) hipI = i;
+    waistI = shoulderI;
+    for (let i = shoulderI; i < hipI; i++) if (widthAt(i) < widthAt(waistI)) waistI = i;
+    const yOf = i => +((top + (bot - top) * (i / (N - 1))) / H).toFixed(4);
+    report.landmarks = {
+      shoulder: { y: yOf(shoulderI), w: +widthAt(shoulderI).toFixed(3) },
+      waist:    { y: yOf(waistI),    w: +widthAt(waistI).toFixed(3) },
+      hip:      { y: yOf(hipI),      w: +widthAt(hipI).toFixed(3) }
+    };
+
+    // visual check: silhouette edges over the photo
+    const vis = document.createElement("canvas");
+    vis.width = W; vis.height = H;
+    const vc = vis.getContext("2d");
+    vc.drawImage(canvas, 0, 0);
+    vc.strokeStyle = "#ff2cc0";
+    vc.lineWidth = 1.5;
+    vc.beginPath();
+    for (let i = 0; i < N; i++) {
+      if (!profile[i]) continue;
+      const y = top + (bot - top) * (i / (N - 1));
+      vc.moveTo(profile[i][0] * W, y);
+      vc.lineTo(profile[i][1] * W, y);
+    }
+    vc.stroke();
+    vc.strokeStyle = "#00e5ff";
+    for (const k of ["shoulder", "waist", "hip"]) {
+      const y = report.landmarks[k].y * H;
+      vc.beginPath(); vc.moveTo(0, y); vc.lineTo(W, y); vc.stroke();
+    }
+    document.getElementById("out").appendChild(vis);
+    await post("/save?name=body_profile_overlay.png", vis.toDataURL("image/png"));
+    document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

@@ -1,0 +1,89 @@
+<!doctype html><meta charset="utf-8"><title>feas bench 2</title><body><pre id="log"></pre><script>
+const L=[]; const say=s=>{L.push(s);document.getElementById('log').textContent=L.join('\n');};
+function tex(w,h,alpha){const c=document.createElement('canvas');c.width=w;c.height=h;
+ const x=c.getContext('2d');const d=x.createImageData(w,h);
+ for(let j=0;j<h;j++)for(let i=0;i<w;i++){const p=(j*w+i)*4;
+   const k=((i>>4)+(j>>4))&1; d.data[p]=k?230:40; d.data[p+1]=k?90:180; d.data[p+2]=60; d.data[p+3]=alpha;}
+ x.putImageData(d,0,0);return c;}
+function drawTri(ctx,pat,src,dst,pad,swap){
+ const au=src[0],av=src[1],bu=src[2],bv=src[3],cu=src[4],cv=src[5];
+ const ax=dst[0],ay=dst[1],bx=dst[2],by=dst[3],cx=dst[4],cy=dst[5];
+ const sbx=bu-au,sby=bv-av,scx=cu-au,scy=cv-av;
+ const den=sbx*scy-sby*scx; if(Math.abs(den)<1e-6)return 0;
+ const dbx=bx-ax,dby=by-ay,dcx=cx-ax,dcy=cy-ay;
+ const m11=(dbx*scy-dcx*sby)/den,m12=(dcx*sbx-dbx*scx)/den;
+ const m21=(dby*scy-dcy*sby)/den,m22=(dcy*sbx-dby*scx)/den;
+ const dx=ax-m11*au-m12*av, dy=ay-m21*au-m22*av;
+ let p=[ax,ay,bx,by,cx,cy];
+ if(pad>0){const gx=(ax+bx+cx)/3,gy=(ay+by+cy)/3;p=[];
+  const pts=[[ax,ay],[bx,by],[cx,cy]];
+  for(let q=0;q<3;q++){const vx=pts[q][0]-gx,vy=pts[q][1]-gy;const l=Math.hypot(vx,vy)||1;
+   p.push(pts[q][0]+vx/l*pad,pts[q][1]+vy/l*pad);}}
+ pat.setTransform(swap?new DOMMatrix([m11,m12,m21,m22,dx,dy]):new DOMMatrix([m11,m21,m12,m22,dx,dy]));
+ ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.lineTo(p[4],p[5]);ctx.closePath();ctx.fill();
+ return 1;}
+function grid(W,H,cols,rows,fn){
+ const src=[],dst=[];
+ for(let j=0;j<=rows;j++)for(let i=0;i<=cols;i++){
+  const u=i/cols*W,v=j/rows*H; src.push(u,v);
+  const q=fn?fn(u,v):[u,v]; dst.push(q[0],q[1]);}
+ const tris=[];
+ for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){
+  const a=j*(cols+1)+i,b=a+1,c=a+cols+1,d=c+1; tris.push(a,b,d,a,d,c);}
+ return {src:src,dst:dst,tris:tris};}
+function renderMesh(ctx,texc,m,pad,swap){
+ const pat=ctx.createPattern(texc,'no-repeat'); ctx.fillStyle=pat;
+ for(let t=0;t<m.tris.length;t+=3){
+  const i0=m.tris[t]*2,i1=m.tris[t+1]*2,i2=m.tris[t+2]*2;
+  drawTri(ctx,pat,[m.src[i0],m.src[i0+1],m.src[i1],m.src[i1+1],m.src[i2],m.src[i2+1]],
+                  [m.dst[i0],m.dst[i0+1],m.dst[i1],m.dst[i1+1],m.dst[i2],m.dst[i2+1]],pad,swap);}}
+function diff(a,b,S,border){let worst=0,bad=0,tot=0;
+ for(let j=border;j<S-border;j++)for(let i=border;i<S-border;i++){const p=(j*S+i)*4;
+  for(let k=0;k<4;k++){tot++;const d=Math.abs(a[p+k]-b[p+k]);if(d>worst)worst=d;if(d>2)bad++;}}
+ return {worst:worst,bad:bad,pct:(100*bad/tot).toFixed(3)};}
+(async function(){try{
+ const S=512,t255=tex(S,S,255);
+ const ref=document.createElement('canvas');ref.width=S;ref.height=S;
+ const rx=ref.getContext('2d',{willReadFrequently:true});rx.drawImage(t255,0,0);
+ const R=rx.getImageData(0,0,S,S).data;
+ say('IDENTITY MESH vs plain drawImage (8x8 grid, checkerboard src):');
+ const pads=[0,0.5,1.0,1.5,2.5];
+ for(let z=0;z<pads.length;z++){
+  const c=document.createElement('canvas');c.width=S;c.height=S;
+  const x=c.getContext('2d',{willReadFrequently:true});
+  renderMesh(x,t255,grid(S,S,8,8,null),pads[z],false);
+  const r=diff(R,x.getImageData(0,0,S,S).data,S,2);
+  say('  pad '+pads[z]+': worst delta='+r.worst+'  channels>2 = '+r.bad+' ('+r.pct+'%)');}
+ // control: deliberately transposed m12/m21 on a SHEAR, to prove the test can detect it
+ say('');say('CONTROL - can a transposed transform be detected at pad 1.5?');
+ const shear=function(u,v){return [u+0.35*v, v];};
+ const cA=document.createElement('canvas');cA.width=S;cA.height=S;
+ const xA=cA.getContext('2d',{willReadFrequently:true});
+ renderMesh(xA,t255,grid(S,S,8,8,shear),1.5,false);
+ const cB=document.createElement('canvas');cB.width=S;cB.height=S;
+ const xB=cB.getContext('2d',{willReadFrequently:true});
+ renderMesh(xB,t255,grid(S,S,8,8,shear),1.5,true);
+ // ground truth for the shear via ctx.transform
+ const cG=document.createElement('canvas');cG.width=S;cG.height=S;
+ const xG=cG.getContext('2d',{willReadFrequently:true});
+ xG.setTransform(1,0,0.35,1,0,0);xG.drawImage(t255,0,0);
+ const G=xG.getImageData(0,0,S,S).data;
+ say('  correct order  vs ctx.setTransform ground truth: worst='+diff(G,xA.getImageData(0,0,S,S).data,S,60).worst+' bad%='+diff(G,xA.getImageData(0,0,S,S).data,S,60).pct);
+ say('  TRANSPOSED     vs ctx.setTransform ground truth: worst='+diff(G,xB.getImageData(0,0,S,S).data,S,60).worst+' bad%='+diff(G,xB.getImageData(0,0,S,S).data,S,60).pct);
+
+ // triangle scaling, higher counts, on a REAL sized dest
+ say('');say('TRIANGLE SCALING to 12k tris (768x1376):');
+ const W=768,H=1376;
+ const o=document.createElement('canvas');o.width=W;o.height=H;
+ const oc=o.getContext('2d',{willReadFrequently:true});
+ const barrel=function(u,v){const nx=(u/W-.5)*2,ny=(v/H-.5)*2,r=Math.hypot(nx,ny),k=1+0.18*r*r;
+  return [(nx*k*.5+.5)*W,(ny*k*.5+.5)*H];};
+ const cfg=[[16,24],[24,40],[32,48],[48,72],[64,96],[80,120]];
+ for(let z=0;z<cfg.length;z++){
+  const m=grid(W,H,cfg[z][0],cfg[z][1],barrel);const nt=m.tris.length/3;
+  let tt=0;for(let rep=0;rep<3;rep++){oc.setTransform(1,0,0,1,0,0);oc.clearRect(0,0,W,H);
+   const s=performance.now();renderMesh(oc,t255,m,1.5,false);tt+=performance.now()-s;}
+  say('  '+String(nt).padStart(6)+' tris: '+(tt/3).toFixed(1)+'ms  ('+((tt/3)*1000/nt).toFixed(2)+' us/tri)');}
+}catch(e){say('ERROR '+e.message+'\n'+e.stack);}
+ fetch('/report',{method:'POST',body:JSON.stringify({log:L.join('\n')})});})();
+</script></body>

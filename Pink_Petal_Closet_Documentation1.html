@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pink Petal Closet &mdash; Documentation</title>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; line-height: 1.45; color: #222; max-width: 7.5in; }
+  h1 { font-size: 22pt; color: #b03a6a; margin-bottom: 2pt; }
+  h2 { font-size: 16pt; color: #b03a6a; margin-top: 22pt; }
+  h3 { font-size: 12.5pt; color: #444; margin-top: 16pt; }
+  .sub { font-size: 13pt; color: #666; margin-top: 0; font-style: italic; }
+  table { border-collapse: collapse; width: 100%; margin: 10pt 0; }
+  th, td { border: 1px solid #bbb; padding: 5pt 7pt; text-align: left; vertical-align: top; font-size: 10pt; }
+  th { background: #fbe9f0; font-weight: bold; }
+  pre { font-family: "Courier New", monospace; font-size: 7.5pt; line-height: 1.15;
+        white-space: pre; background: #fafafa; border: 1px solid #ddd; padding: 8pt; }
+  pre.narrow { font-size: 8.5pt; }
+  blockquote { border-left: 3px solid #e3a3bd; margin-left: 0; padding-left: 10pt; color: #555; font-size: 10pt; }
+  code { font-family: "Courier New", monospace; font-size: 10pt; }
+  ul { margin-top: 4pt; }
+  li { margin-bottom: 4pt; }
+</style>
+</head>
+<body>
+
+<h1>Pink Petal Closet</h1>
+<p class="sub">An AI digital wardrobe, outfit stylist and worn-render studio</p>
+
+<p>
+<b>Version:</b> current as of 10 September 2026<br>
+<b>Type:</b> static client-side web application (no build step) + local API proxy<br>
+<b>Status:</b> working; 304 automated assertions passing across 16 validation suites
+</p>
+
+<blockquote>
+This document supersedes the earlier draft documentation, which described an
+earlier design &mdash; including a pre-rendered &ldquo;3D mannequin&rdquo; feature that has
+since been removed from the product. Every claim below reflects what the
+application actually does today.
+</blockquote>
+
+<h2>1. Project description</h2>
+
+<p>Pink Petal Closet turns a camera roll into a wardrobe you can actually style from.</p>
+
+<p>You give it any clothing photograph &mdash; a shop screenshot, a flat lay, or a
+picture of someone wearing the garment &mdash; and it gives back <b>just that
+garment</b>, cut out on transparency, with the background, the model and the
+hanger removed. Those cutouts become a searchable closet. You then describe
+where you are going in plain words, and the app assembles a coherent outfit from
+your own clothes and, on request, returns a photograph of that outfit being worn
+on a mannequin.</p>
+
+<p>There are three distinct pieces of work in it:</p>
+
+<p><b>Getting the garment out of the photo.</b> A vision-language model first
+looks at the picture and answers two questions no pixel rule can: <i>which</i>
+item is this photo about, and <i>where</i> is it. That keeps props, hangers and
+the rest of an outfit out of the result. A human-parsing model (MediaPipe
+selfie-multiclass) then separates clothing from body, and a marker-based
+watershed segmentation handles the case that defeats every colour-based method
+&mdash; a white garment on a white backdrop. Fabric hidden behind hair or a
+forearm is reconstructed from the surrounding weave, so a photo of a friend
+wearing a dress still yields a whole dress rather than one with a bite out of
+it. Where the automatic pass gets it wrong, a <b>Cutout Editor</b> lets you tap
+the garment you want, drag a box around it, or repair the edge by hand with
+three brushes: <i>Erase</i>, <i>Draw Back</i> (which restores the photograph's
+own pixels) and <i>Fill In</i> (which invents fabric from the garment
+surrounding the gap).</p>
+
+<p><b>Deciding what to wear.</b> You type an occasion &mdash; &ldquo;office
+meeting&rdquo;, &ldquo;diwali dinner&rdquo;, &ldquo;trekking&rdquo;, &ldquo;rainy
+day errands&rdquo; &mdash; and the stylist sorts the phrase into one of fourteen
+occasion buckets, then scores every garment in your closet on how well its tags
+match the words you typed and the occasion itself, plus colour harmony against
+anything you have pinned. It chooses between a dress and separates by scoring
+the best dress against the best top-and-bottom pair, and you can overrule it.
+Pieces can be locked while the rest are shuffled, a whole outfit can be built
+around one garment, and any slot can be switched off for the day. When it does
+not recognise a phrase, it says so rather than quietly returning something
+generic.</p>
+
+<p><b>Showing it.</b> Before anything is spent, the look appears as a flat
+display of your own pieces laid out on white. This answers <i>what did it
+pick</i> without pretending to know how the fabric will hang &mdash; a flat
+photograph placed on a body invites a comparison it cannot win. Pressing
+<b>See It Worn</b> sends the garment cutouts and a bare mannequin to an image
+model and returns a photograph of the outfit genuinely being worn, fabric
+following the body, with folds and contact shadows.</p>
+
+<h2>2. Project use case</h2>
+
+<h3>The problem</h3>
+
+<p>Most people own more clothes than they can hold in their head. The
+consequences are ordinary and constant: the same three outfits on rotation,
+garments bought and never worn, and a decision every morning made against a
+wardrobe you cannot see all of at once. Existing answers do not fit. A photo
+album is not a wardrobe &mdash; you cannot ask it what goes together. Retail
+try-on tools style you in clothes you do not own, which is advertising rather
+than help. And any tool that starts with &ldquo;photograph each garment against
+a plain background&rdquo; has already lost, because nobody does that.</p>
+
+<h3>Who it is for</h3>
+
+<table border="1">
+<tr><th>User</th><th>What they get</th></tr>
+<tr><td>Someone with a full wardrobe and no overview</td><td>Their real clothes, digitised from photos they already have, in one browsable catalogue</td></tr>
+<tr><td>Someone deciding what to wear</td><td>An outfit assembled from what they own, for the occasion they name, in seconds</td></tr>
+<tr><td>Someone shopping</td><td>A garment screenshotted from a shop, cut out, and tried against their existing clothes before buying</td></tr>
+<tr><td>Someone packing or planning</td><td>Saved looks that can be recalled and restyled, rather than re-decided</td></tr>
+</table>
+
+<h3>Worked examples</h3>
+
+<p><b>Digitising a garment you are already wearing.</b> You photograph a friend
+in a dress. The vision model identifies the dress and its box; the parser
+separates it from the body; the occlusion repair fills in the part an arm was
+covering. What lands in the closet is the dress, alone, on transparency &mdash;
+usable in an outfit even though no product photo of it ever existed.</p>
+
+<p><b>Dressing for a real occasion.</b> You type &ldquo;diwali dinner&rdquo;. The
+stylist reads <i>diwali</i> as a festival rather than as a meal, weighs your
+festive-tagged pieces, and assembles a look. You lock the earrings, shuffle
+everything else twice, then press See It Worn and get a photograph of it on a
+mannequin. You save it. Next week you recall the look and swap the shoes.</p>
+
+<p><b>Shopping without guessing.</b> You screenshot a jacket from a shop's
+website. It comes out cut from the page. You style it against the trousers you
+already own, see it worn, and decide.</p>
+
+<h3>What it deliberately does not do</h3>
+
+<p>Stated because a tool's limits are part of its description:</p>
+<ul>
+<li>It does not put clothes on <b>you</b>. There is a mannequin, not a body model.</li>
+<li>It does not simulate drape. Before a render, garments are shown as photographed, not warped onto a body &mdash; a wrong guess about fabric is more misleading than an honest flat lay.</li>
+<li>It does not fill in a garment's <b>neckline</b>. A neckline and an occlusion bite are indistinguishable at pixel level, and turning a V-neck into a boat neck would be worse than leaving a notch.</li>
+<li>It does not render automatically. Every render is a paid API call, so it is always a deliberate press.</li>
+</ul>
+
+<h2>3. Architecture diagram</h2>
+
+<p>Everything runs in the browser. The only server is a local dev proxy whose
+sole purpose is to keep the API key out of the page.</p>
+
+<pre>
+                        +--------------------------------------+
+                        |            THE BROWSER               |
+                        |     (static files, no build step)    |
+                        +--------------------------------------+
+
+  +---------------------------------------------------------------------------+
+  |  index.html   +   style.css                                               |
+  |                                                                           |
+  |  Dashboard pane            +            Phone-simulator pane              |
+  |  (both panes call the same functions - one app, two front ends)           |
+  +-------------------------------+-------------------------------------------+
+                                  |
+  +-------------------------------v-------------------------------------------+
+  |  app.js - state . closet . stylist . UI . storage                         |
+  |                                                                           |
+  |   isolation adapter    stylist    the board    saved looks                |
+  +---+---------------+---------------+------------------+--------------------+
+      |               |               |                  |
++-----v------+  +-----v-------+  +----v----------+  +----v-------------+
+| vlm-       |  | garment-    |  | modules/  (9) |  | tryon-service.js |
+| service.js |  | engine.js   |  |               |  |                  |
+|            |  |             |  | seg-watershed |  | builds the prompt|
+| WHICH item |  | human       |  | garment-cutout|  | measures colours |
+| is this,   |  | parsing,    |  | cutout-paint  |  | caches by outfit |
+| and WHERE  |  | occlusion   |  | body-model    |  +----+-------------+
+|            |  | repair,     |  | garment-fit   |       |
+|            |  | matting     |  | straighten    |       |
++-----+------+  +-----+-------+  | outfit-compose|       |
+      |               |          | outfit-display|       |
+      |               |          | worn-render   |       |
+      |               |          +---------------+       |
+      |               |                                  |
+      |               v                                  |
+      |      +------------------+                        |
+      |      | MediaPipe model  |  fetched once, then    |
+      |      | (Cache API)      |  cached in the browser  |
+      |      +------------------+                        |
+      |                                                  |
+      +------------------+-------------------------------+
+                         |  POST /api/vlm  .  POST /api/tryon
+                         v
+       +--------------------------------------------------+
+       |  server.ps1  -  local dev server + API proxy     |
+       |  serves the static files on :8080, and holds the  |
+       |  API key so the browser never sees it             |
+       |                                                   |
+       |  /api/vlm     /api/tryon     /api/tryon/status    |
+       +---------------------------+----------------------+
+                                   |
+                                   v
+       +--------------------------------------------------+
+       |  Google Vertex AI                                |
+       |    - vision-language model  (identify + locate)  |
+       |    - Gemini 2.5 Flash Image (the worn render)    |
+       +--------------------------------------------------+
+
+  PERSISTENCE  (all client-side; nothing leaves the machine)
+  +--------------------------------------------------------------------+
+  | localStorage   pp_wardrobe_v3      the closet, cutouts included    |
+  |                pp_looks_v1         saved looks (garment ids)       |
+  |                pp_worn_v2          per-garment ghost renders       |
+  |                pp_slot_optout      slots switched off "not today"  |
+  |                pp_outfit_shape     dress / separates preference    |
+  |                                                                    |
+  | IndexedDB      pp_renders / looks  every worn render, uncapped     |
+  | Cache API                          the MediaPipe model             |
+  +--------------------------------------------------------------------+
+</pre>
+
+<h3>The isolation pipeline, in order</h3>
+
+<pre class="narrow">
+  photo
+    |
+    v
+  [1]  decode, downscale to 768px
+    |
+    v
+  [2]  semantic pass - background / hair / skin / face / clothes / accessory
+    |         (MediaPipe; colour-heuristic fallback when offline)
+    v
+  [3]  anatomy - shoulder, hip and knee lines, derived from the FACE
+    |
+    v
+  [4]  piece split - rows grouped into stacked garments by colour cluster
+    |
+    v
+  [5]  selection - which stacked piece the user asked for
+    |
+    v
+  [6]  cleanup - straps, props and bare limbs read as fabric, removed
+    |
+    v
+  [6b] occlusion repair - fabric behind hair or a limb, put back
+    |
+    v
+  [7]  matting - soft alpha edge + colour decontamination + inpainting
+    |
+    v
+  [8]  render - tight crop, encode to WebP with alpha
+    |
+    v
+  [9]  metrics - score the cutout so a bad one can be flagged, not shipped
+    |
+    v
+  cutout + colour + fabric + tags   ->   the closet
+</pre>
+
+<h3>Two routes to a picture</h3>
+
+<pre class="narrow">
+   an outfit on the board
+            |
+            +---------------- free, instant --------------+
+            |                                             |
+            v                                             v
+   FLAT DISPLAY                                    "See It Worn"
+   the real cutouts, laid                           (a paid call)
+   out on white, sized                                    |
+   for legibility                                         v
+            ^                                   prompt states each garment's
+            |                                   colour as measured sRGB
+            |                                              |
+            |                                              v
+            |                                   render returned, then CHECKED
+            |                                   against your own photo for
+            |                                   colour drift and length drift
+            |                                              |
+            |                                   +----------+-----------+
+            |                                   v                      v
+            |                             matches: kept          drifted: refused,
+            |                             in IndexedDB           your photo retained
+            |                                   |
+            +------------ toggle --------------+
+                    (free, either way)
+</pre>
+
+<h2>4. Key technical decisions</h2>
+
+<p>Each of these was reached by measurement, and each replaced something that
+looked reasonable and did not work.</p>
+
+<table border="1">
+<tr><th>Decision</th><th>Why</th></tr>
+<tr><td><b>Watershed segmentation</b> rather than a colour threshold</td>
+<td>A white top on a white sweep has no colour difference to threshold. Flooding from the backdrop with a stability sweep over 16 candidate thresholds gets it; measured cutout quality 94&ndash;100 on clean shots, 76&ndash;81 on white-on-white.</td></tr>
+<tr><td><b>Occlusion repair works from notches, not from deleted pixels</b></td>
+<td>Hair over a shoulder is labelled <i>hair</i> from the start, so it never enters the &ldquo;removed&rdquo; set the earlier repair worked from. Closing the garment outline and filling only dents an occluder is standing in reduced one bite from 1145&nbsp;px to 43, another from 4310 to 1427.</td></tr>
+<tr><td><b>A flat display before any render</b></td>
+<td>Placing a flat photograph on a mannequin invites a comparison it cannot win: every place the fabric fails to follow the body reads as a defect in the garment. A flat lay promises nothing about drape.</td></tr>
+<tr><td><b>The render prompt states a MEASURED colour</b></td>
+<td>An earlier version quoted the wardrobe's stored colour name &mdash; and that name comes from a coarse 20-bucket table where any saturated gold is &ldquo;Amber&rdquo;. It was asking for an amber dress about a yellow one. The colour is now measured from the pixels being sent, as sRGB.</td></tr>
+<tr><td><b>Renders are verified, not trusted</b></td>
+<td>A prompt is a request. The result is compared against the wearer's own photo (CIE76 colour difference; length as height over shoulder width) and refused if it drifted. Calibrated on a faithful render: &Delta;E 1.4, 0.1% drift, against thresholds of 12 and 20%.</td></tr>
+<tr><td><b>Renders live in IndexedDB, uncapped</b></td>
+<td>localStorage has ~5&nbsp;MB for the whole app, which forced eviction &mdash; a render you had paid for could vanish because you had rendered others since. Wrong behaviour for something bought.</td></tr>
+<tr><td><b>Whole-word matching in the stylist</b></td>
+<td>Substring matching made &ldquo;gym workout&rdquo; an office outfit (<i>workout</i> contains <i>work</i>) and &ldquo;airport travel day&rdquo; a party outfit (<i>travel</i> contains <i>rave</i>).</td></tr>
+<tr><td><b>Tags come from a vision model, with a supplied vocabulary</b></td>
+<td>The mechanical tagger put &ldquo;chic&rdquo; on 100% of garments and &ldquo;boutique&rdquo; on 61% &mdash; words in no occasion list and no real search, occupying two of five tag slots.</td></tr>
+</table>
+
+<h2>5. Validation</h2>
+
+<p>Correctness is held by a harness, not by inspection: <b>16 headless-browser
+suites, 304 assertions</b>, run with one command and exercising the real
+application rather than mocks.</p>
+
+<table border="1">
+<tr><th>Suite</th><th>What it holds</th></tr>
+<tr><td>module-cutout, module-watershed</td><td>cutout quality on 10 fixtures, including three white-on-white</td></tr>
+<tr><td>occlusion-probe</td><td>every fixture extracted twice, with the repair on <b>and</b> off, so the comparison is between two runs rather than against remembered numbers</td></tr>
+<tr><td>path-probe</td><td>which isolation path each realistic upload route actually reaches</td></tr>
+<tr><td>fidelity-probe</td><td>what the AI prompts say, and that a drifted render is caught in both directions</td></tr>
+<tr><td>stylist-probe</td><td>22 prompts sorted into buckets; per-slot determinism</td></tr>
+<tr><td>tags-probe</td><td>tag distribution across the whole catalogue, and a colour table for 14 garments whose colour is not in dispute</td></tr>
+<tr><td>parity-probe</td><td>saved looks, render persistence, and that every control the phone renders is wired to a function that exists</td></tr>
+<tr><td>dress-probe, display-probe, preview-probe</td><td>the dress/separates choice, board layout, and that no button label is clipped</td></tr>
+</table>
+
+<p>The runner treats an <b>aborted</b> probe as a failure. A suite that throws
+part-way records zero failures and a short count, which reads exactly like
+success &mdash; so that case is caught explicitly rather than left to be
+noticed.</p>
+
+<h2>6. How to run it</h2>
+
+<pre class="narrow">
+  cd "path\to\Outfit Generator"
+
+  .\start.ps1            # serves on http://localhost:8080 and opens it
+  .\lab\run-suite.ps1    # the full validation suite
+</pre>
+
+<p><code>start.ps1</code> obtains a Vertex AI token (via <code>gcloud</code>, or
+a pasted one) so the AI features work; without it the app still runs, falling
+back to pixel-only isolation and disabling the render button with the reason
+shown.</p>
+
+<p><b>Serve it &mdash; do not open <code>index.html</code> from disk.</b> A
+<code>file://</code> page cannot read pixels back out of a canvas, so isolation
+fails silently.</p>
+
+<h2>7. What is not built</h2>
+
+<p>Stated plainly, because an honest boundary is more useful than an implied
+one:</p>
+<ul>
+<li><b>No accounts, no cloud sync.</b> The wardrobe lives in one browser on one machine. A user's closet does not follow them to another device.</li>
+<li><b>No real mobile app.</b> The phone pane is a simulator running the same code as the dashboard, which is what makes the layout and the flows real &mdash; but it is not a packaged iOS or Android build.</li>
+<li><b>The Cutout Editor is desktop-only by design.</b> It is a full-screen canvas with a drag box and three brushes; a 320px copy would be a worse tool pretending to be a feature.</li>
+<li><b>Model behaviour is not regression-tested.</b> Every check of it costs a call and the same prompt does not always return the same picture, so the prompts are tested for <i>what they say</i> and each render is verified on arrival.</li>
+</ul>
+
+</body>
+</html>

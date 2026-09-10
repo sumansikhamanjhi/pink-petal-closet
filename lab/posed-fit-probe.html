@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Posed garments on the mannequin</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1320px;height:920px;border:0;background:#fff;opacity:0.2}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { cases: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+function flush() {
+  post("/save?name=progress.json", btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+}
+
+/**
+ * What a garment cut from a POSED photo looks like on the mannequin.
+ *
+ * The complaint is that a garment worn a certain way is stored that way — arms
+ * bent or raised — and then sits on the mannequin at the model's angles instead
+ * of hanging straight. These four photos cover the range: arms overhead, an arm
+ * across the body, a runway walk, and a flat mannequin shot as the control that
+ * must NOT change.
+ *
+ * The numbers are what makes this actionable rather than a matter of taste:
+ * per-row lean (how far the garment's own centre line wanders off vertical) and
+ * limb splay (how much sticks out beyond the torso's width).
+ */
+const CASES = [
+  { file: "lab/testset/casual_tshirt_jeans.jpg", mode: "top",    cat: "tops",    note: "arms overhead" },
+  { file: "lab/testset/dress_red_runway.jpg",    mode: "dress",  cat: "dresses", note: "runway walk, arm bent" },
+  { file: "lab/testset/dress_white_outdoor.jpg", mode: "dress",  cat: "dresses", note: "outdoor pose" },
+  { file: "lab/testset/mannequin_top_skirt.jpg", mode: "bottom", cat: "bottoms", note: "control: flat mannequin shot" }
+];
+
+/** Per-row silhouette measurements of a cutout, from its alpha. */
+function measure(px, w, h, t) {
+  const rows = [];
+  for (let y = 0; y < h; y++) {
+    let l = -1, r = -1, n = 0;
+    for (let x = 0; x < w; x++) {
+      if (px[(y * w + x) * 4 + 3] < t) continue;
+      if (l < 0) l = x;
+      r = x; n++;
+    }
+    rows.push(l < 0 ? null : { l, r, n, mid: (l + r) / 2, half: (r - l + 1) / 2 });
+  }
+  return rows;
+}
+
+/**
+ * How far the garment leans, and how far its widest parts stick out past the
+ * body of it. A flat-lay scores near zero on both; a posed shot does not.
+ */
+function poseStats(rows) {
+  const live = rows.filter(Boolean);
+  if (live.length < 8) return null;
+  const mids = live.map(r => r.mid);
+  const halves = live.map(r => r.half).sort((a, b) => a - b);
+  const median = halves[Math.floor(halves.length / 2)];
+  const widest = halves[halves.length - 1];
+  const meanMid = mids.reduce((a, b) => a + b, 0) / mids.length;
+  let lean = 0;
+  for (const m of mids) lean = Math.max(lean, Math.abs(m - meanMid));
+  return {
+    // both normalised by the garment's own typical half-width, so they are
+    // comparable between a crop top and a maxi dress
+    lean: +(lean / Math.max(1, median)).toFixed(2),
+    splay: +(widest / Math.max(1, median)).toFixed(2),
+    medianHalf: Math.round(median)
+  };
+}
+
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = expr => win.eval(expr);
+    for (let i = 0; i < 100; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof renderOutfitDisplay === 'function'")) break;
+      await wait(250);
+    }
+
+    const base = await new Promise((res, rej) => {
+      const i = new win.Image(); i.onload = () => res(i); i.onerror = rej;
+      i.src = "../assets/mannequin_base.jpg";
+    });
+
+    const PW = 300, PH = 430;
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * 3;
+    sheet.height = PH * CASES.length;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let ci = 0; ci < CASES.length; ci++) {
+      const cse = CASES[ci];
+      const entry = { file: cse.file.split("/").pop(), note: cse.note };
+      const res = await read("GarmentEngine").extract("../" + cse.file, {
+        mode: cse.mode, background: "transparent", padding: 0, outputMaxDim: 720
+      });
+
+      // the stored cutout, exactly as the closet would hold it
+      const img = await new Promise(r => {
+        const i = new win.Image(); i.onload = () => r(i); i.onerror = () => r(null); i.src = res.image;
+      });
+      const cv = document.createElement("canvas");
+      cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+      const cx = cv.getContext("2d", { willReadFrequently: true });
+      cx.drawImage(img, 0, 0);
+      const data = cx.getImageData(0, 0, cv.width, cv.height).data;
+      const alpha = new Float32Array(cv.width * cv.height);
+      for (let p = 0; p < alpha.length; p++) alpha[p] = data[p * 4 + 3] / 255;
+
+      entry.cutout = cv.width + "x" + cv.height;
+      entry.pose = poseStats(measure(data, cv.width, cv.height, 90));
+
+      // fit it to the mannequin the way the app does
+      const FW = 512, FH = Math.round(FW * base.naturalHeight / base.naturalWidth);
+      let fitted = null;
+      try {
+        fitted = read("GarmentFit").fit(
+          { canvas: cv, width: cv.width, height: cv.height, alpha },
+          cse.cat, { frameWidth: FW, frameHeight: FH });
+        entry.placement = fitted.placement.top.toFixed(3) + "-" + fitted.placement.bottom.toFixed(3);
+        entry.warp = fitted.warp;
+        entry.straightened = fitted.straightened;
+      } catch (e) { entry.fitError = String(e && e.message || e); }
+
+      const y = ci * PH + 16;
+      const label = (k, name) => {
+        sc.fillStyle = "#8ad"; sc.font = "11px monospace";
+        sc.fillText(name, k * PW + 4, ci * PH + 12);
+      };
+      const fit = (k, c) => {
+        if (!c) return;
+        const s = Math.min(PW / c.width, (PH - 22) / c.height);
+        sc.drawImage(c, k * PW + (PW - c.width * s) / 2, y, c.width * s, c.height * s);
+      };
+
+      label(0, cse.note); fit(0, cv);
+
+      if (fitted) {
+        const over = document.createElement("canvas");
+        over.width = FW; over.height = FH;
+        const oc = over.getContext("2d");
+        oc.drawImage(base, 0, 0, FW, FH);
+        oc.drawImage(fitted.canvas, 0, 0);
+        label(1, "on the mannequin"); fit(1, over);
+
+        // the body outline, so a bad hang is obvious rather than arguable
+        const guide = document.createElement("canvas");
+        guide.width = FW; guide.height = FH;
+        const gc = guide.getContext("2d");
+        gc.drawImage(over, 0, 0);
+        const B = read("BodyModel");
+        const pts = B.BODY.profile, ccx = B.BODY.centreX * FW;
+        gc.beginPath();
+        gc.moveTo(ccx - pts[0][1] * FW, pts[0][0] * FH);
+        for (let i = 1; i < pts.length; i++) gc.lineTo(ccx - pts[i][1] * FW, pts[i][0] * FH);
+        for (let i = pts.length - 1; i >= 0; i--) gc.lineTo(ccx + pts[i][1] * FW, pts[i][0] * FH);
+        gc.closePath();
+        gc.strokeStyle = "rgba(255,44,192,0.9)";
+        gc.lineWidth = 2;
+        gc.stroke();
+        label(2, "vs the body"); fit(2, guide);
+      }
+
+      report.cases.push(entry);
+      say(entry.file + "  lean=" + (entry.pose ? entry.pose.lean : "?") +
+          " splay=" + (entry.pose ? entry.pose.splay : "?") + "  " + cse.note);
+      flush();
+    }
+    await post("/save?name=posed_fit.png", sheet.toDataURL("image/png"));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Body model measurement</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+pre{white-space:pre-wrap}canvas{max-height:520px;margin:6px}</style></head>
+<body>
+<pre id="log">measuring…</pre>
+<div id="out"></div>
+<script src="../garment-engine.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Measures the bare mannequin so the fitter has a real body to work against:
+ * a per-row silhouette (left edge, right edge) plus the named landmark rows.
+ * Hand-read numbers were good enough to place a box; warping a garment onto a
+ * body needs the body's actual outline.
+ */
+(async function () {
+  const report = {};
+  try {
+    const img = await GarmentEngine._internals.loadImage("../assets/mannequin_base.jpg");
+
+    // a generous box around the mannequin: it stands centred, head to feet
+    const res = await GarmentEngine.extractObject(img, {
+      region: { x: 0.22, y: 0.07, w: 0.56, h: 0.86 },
+      category: "body",
+      padding: 0,
+      debug: true
+    });
+    const d = res._debug, W = d.w, H = d.h;
+    report.proc = W + "x" + H;
+    report.metrics = res.metrics;
+    report.warnings = res.warnings;
+
+    // per-row extent of the isolated body
+    const alpha = d.alpha;
+    const rows = [];
+    for (let y = 0; y < H; y++) {
+      let l = -1, r = -1, n = 0;
+      for (let x = 0; x < W; x++) {
+        if (alpha[y * W + x] > 0.5) { if (l < 0) l = x; r = x; n++; }
+      }
+      rows.push(l < 0 ? null : { l: l / W, r: r / W, fill: n / W });
+    }
+    let top = rows.findIndex(Boolean);
+    let bot = H - 1;
+    while (bot > 0 && !rows[bot]) bot--;
+    report.bodyTop = +(top / H).toFixed(4);
+    report.bodyBottom = +(bot / H).toFixed(4);
+
+    // The arms hang beside the torso, so the widest row is arm-to-arm, not the
+    // torso. Torso width is taken from the *central* run of the row instead:
+    // scan out from the body centre until the alpha breaks.
+    const centreX = Math.round(W * 0.495);
+    const torso = [];
+    for (let y = 0; y < H; y++) {
+      if (!rows[y]) { torso.push(null); continue; }
+      let l = centreX, r = centreX;
+      if (alpha[y * W + centreX] <= 0.5) { torso.push(null); continue; }
+      while (l > 0 && alpha[y * W + (l - 1)] > 0.5) l--;
+      while (r < W - 1 && alpha[y * W + (r + 1)] > 0.5) r++;
+      torso.push({ l: l / W, r: r / W, half: (r - l) / 2 / W, mid: ((l + r) / 2) / W });
+    }
+
+    // sample the profile at 64 heights for a compact, bakeable table
+    const N = 64;
+    const profile = [];
+    for (let i = 0; i < N; i++) {
+      const y = top + (bot - top) * (i / (N - 1));
+      const t = torso[Math.round(y)];
+      profile.push({
+        y: +(y / H).toFixed(4),
+        half: t ? +t.half.toFixed(4) : null,
+        mid: t ? +t.mid.toFixed(4) : null
+      });
+    }
+    report.profile = profile;
+
+    // named landmarks from the torso profile
+    const at = frac => {
+      const y = Math.round(top + (bot - top) * frac);
+      return torso[y];
+    };
+    const findExtreme = (from, to, pick) => {
+      let best = null, bestY = null;
+      for (let y = Math.round(top + (bot - top) * from); y <= Math.round(top + (bot - top) * to); y++) {
+        const t = torso[y];
+        if (!t) continue;
+        if (best === null || pick(t.half, best)) { best = t.half; bestY = y; }
+      }
+      return bestY === null ? null : { y: +(bestY / H).toFixed(4), half: +best.toFixed(4) };
+    };
+    report.landmarks = {
+      shoulder: findExtreme(0.14, 0.24, (v, b) => v > b),   // widest across the upper torso
+      bust:     at(0.25) ? { y: +((top + (bot - top) * 0.25) / H).toFixed(4), half: +at(0.25).half.toFixed(4) } : null,
+      waist:    findExtreme(0.30, 0.42, (v, b) => v < b),   // narrowest in the middle
+      hip:      findExtreme(0.43, 0.52, (v, b) => v > b),   // widest across the hips
+      knee:     at(0.72) ? { y: +((top + (bot - top) * 0.72) / H).toFixed(4), half: +at(0.72).half.toFixed(4) } : null,
+      ankle:    at(0.90) ? { y: +((top + (bot - top) * 0.90) / H).toFixed(4), half: +at(0.90).half.toFixed(4) } : null
+    };
+
+    // visual check: silhouette edges + landmark lines over the photo
+    const src = GarmentEngine._internals.toCanvas(img, 768);
+    const vis = document.createElement("canvas");
+    vis.width = W; vis.height = H;
+    const vc = vis.getContext("2d");
+    vc.drawImage(src, 0, 0, W, H);
+    vc.globalAlpha = 0.45;
+    vc.fillStyle = "#ff2cc0";
+    const layer = vc.createImageData(W, H);
+    for (let p = 0; p < W * H; p++) {
+      if (alpha[p] > 0.5) {
+        layer.data[p * 4] = 255; layer.data[p * 4 + 1] = 44; layer.data[p * 4 + 2] = 192;
+        layer.data[p * 4 + 3] = 90;
+      }
+    }
+    const tmp = document.createElement("canvas");
+    tmp.width = W; tmp.height = H;
+    tmp.getContext("2d").putImageData(layer, 0, 0);
+    vc.globalAlpha = 1;
+    vc.drawImage(tmp, 0, 0);
+    vc.strokeStyle = "#00e5ff";
+    vc.lineWidth = 1.5;
+    for (let i = 0; i < N; i++) {
+      const t = profile[i];
+      if (t.half == null) continue;
+      const y = t.y * H;
+      vc.beginPath();
+      vc.moveTo((t.mid - t.half) * W, y);
+      vc.lineTo((t.mid + t.half) * W, y);
+      vc.stroke();
+    }
+    vc.strokeStyle = "#ffe000";
+    for (const k in report.landmarks) {
+      const lm = report.landmarks[k];
+      if (!lm) continue;
+      vc.beginPath(); vc.moveTo(0, lm.y * H); vc.lineTo(W, lm.y * H); vc.stroke();
+      vc.fillStyle = "#ffe000";
+      vc.font = "13px monospace";
+      vc.fillText(k + " " + lm.half, 6, lm.y * H - 4);
+    }
+    document.getElementById("out").appendChild(vis);
+    await post("/save?name=body_measure.png", vis.toDataURL("image/png"));
+    document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

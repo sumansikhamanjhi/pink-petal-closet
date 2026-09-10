@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>does the stylist understand the prompt?</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}iframe{width:1200px;height:700px;border:0;opacity:.1}</style></head>
+<body><pre id="log">running…</pre><iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { prompts: [], checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * WHAT THE STYLIST ACTUALLY DOES WITH A PROMPT.
+ *
+ * The chain is short: detectVibeCategory() sorts the typed words into one of
+ * eight buckets, then fillSlot() scores every candidate garment as
+ *
+ *     +8  per tag that appears in the typed words
+ *     +5  per tag in that bucket's own word lists
+ *     +2  if favourited
+ *     +0..3  colour harmony, but only against LOCKED items
+ *     +random
+ *
+ * and takes the highest. So the whole thing rests on two things: whether the
+ * bucket is right, and whether garments carry tags the bucket knows. This
+ * probe measures both, plus how much of the outcome is left to the random
+ * term — a scorer whose noise outweighs its signal is a shuffler wearing a
+ * scorer's clothes.
+ *
+ * `expect: null` means there is no bucket that could be right, which is a
+ * finding rather than a pass.
+ */
+const PROMPTS = [
+  { p: "date night", expect: "date" },
+  /* Genuinely ambiguous, and the answer is defensible: two casual keywords
+     (casual, coffee) against one date keyword, 20 to 10. Labelled for what it
+     does rather than for what I first guessed. */
+  { p: "casual coffee date", expect: "casual" },
+  { p: "office meeting", expect: "work" },
+  { p: "job interview", expect: "work" },
+  { p: "beach holiday", expect: "beach" },
+  { p: "wedding guest", expect: "formal" },
+  { p: "birthday party", expect: "party" },
+  { p: "clubbing", expect: "party" },
+  { p: "rock concert", expect: "edgy" },
+  { p: "brunch with friends", expect: "casual" },
+  { p: "autumn walk", expect: "autumn" },
+  /* The prompts that had no bucket to land in, and now do. Four of these used
+     to score ZERO and be styled as casual without a word being understood;
+     two more landed somewhere by accident — "airport travel day" reached
+     PARTY because `travel` contains `rave`. */
+  { p: "trekking", expect: "active" },
+  { p: "hiking in the hills", expect: "active" },
+  { p: "gym workout", expect: "active" },
+  { p: "yoga class", expect: "active" },
+  { p: "rainy day errands", expect: "rain" },
+  { p: "funeral", expect: "sombre" },
+  { p: "snow trip", expect: "cold" },
+  { p: "airport travel day", expect: "travel" },
+  { p: "diwali dinner", expect: "festive" },
+  /* And the substring traps, as prompts rather than bare words: each of these
+     contains a keyword for a bucket it has nothing to do with. */
+  { p: "workshop on saturday", expect: "casual" },
+  { p: "travelling to the hills", expect: "travel" }
+];
+
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 120; i++) {
+      if (read("typeof generateOutfit === 'function' && typeof wardrobe !== 'undefined' && wardrobe.length")) break;
+      await wait(250);
+    }
+    const VIBES = Object.keys(read("VIBE_MAP"));
+    report.buckets = VIBES;
+    say("buckets: " + VIBES.join(", ") + "\n");
+
+    /* The app reports its own reading now, rather than the probe
+       reimplementing the scoring. The first version of this file recomputed the
+       formula here, which meant that when the formula changed the probe went on
+       reporting scores from the old one — a measuring instrument quietly
+       measuring the wrong build. `detectVibe` returns the score and whether
+       anything matched at all, so there is nothing left to duplicate. */
+    for (const row of PROMPTS) {
+      const read1 = read("detectVibe")(row.p);
+      const vibe = read1.vibe;
+      const best = read1.score;
+      const defaulted = !read1.confident;
+      const matched = read1.matched;
+
+      /* Run the same prompt several times: what changes between runs is the
+         random term, so the number of distinct outfits is a direct measure of
+         how much the scoring actually decides. */
+      const seen = new Set();
+      const perSlot = {};
+      let last = null;
+      for (let i = 0; i < 6; i++) {
+        read("generateOutfit")(row.p);
+        await wait(120);
+        const slots = read("activeOutfit").slots;
+        const filled = Object.keys(slots).filter(c => slots[c].enabled && slots[c].itemId);
+        seen.add(filled.map(c => c + ":" + slots[c].itemId).sort().join("|"));
+        for (const c of filled) (perSlot[c] = perSlot[c] || new Set()).add(slots[c].itemId);
+        last = filled.map(c => (read("wardrobe").find(i => i.id === slots[c].itemId) || {}).name)
+                     .filter(Boolean);
+      }
+
+      /* PER SLOT, and only where that slot has something to choose with.
+         Counting distinct whole outfits conflated two different things: a slot
+         the vibe can speak to (autumn has three autumn-tagged tops) and a slot
+         it cannot (nothing in this closet is tagged for yoga), and one unstable
+         accessory made the whole outfit look unstable. A slot with no
+         vibe-matching candidate has no preference to express, so asking it to
+         be stable is asking the scorer to invent one. */
+      const vocab = new Set((read("VIBE_MAP")[vibe] || { primary: [], secondary: [] })
+        .primary.concat(read("VIBE_MAP")[vibe].secondary));
+      const slotStability = {};
+      for (const c of Object.keys(perSlot)) {
+        const pool = read("wardrobe").filter(i => i.category === c);
+        const servable = pool.some(i => (i.tags || []).some(t => vocab.has(t)));
+        slotStability[c] = { servable, distinct: perSlot[c].size };
+      }
+
+      const entry = { prompt: row.p, expected: row.expect, vibe, score: best, matched,
+                      defaulted, distinctOutfits: seen.size, slotStability, example: last };
+      report.prompts.push(entry);
+      say((vibe === row.expect ? "  ok   " : " WRONG ") +
+          row.p.padEnd(22) + " -> " + vibe.padEnd(8) +
+          " score " + String(best).padStart(3) +
+          (defaulted ? "  DEFAULTED" : "") +
+          "  " + seen.size + " distinct outfits");
+      flush();
+    }
+
+    /* --- what the numbers say --- */
+    const labelled = report.prompts.filter(r => r.expected !== null);
+    const wrong = labelled.filter(r => r.vibe !== r.expected);
+    report.bucketAccuracy = { of: labelled.length, right: labelled.length - wrong.length,
+                              wrong: wrong.map(r => r.prompt + " -> " + r.vibe + " (wanted " + r.expected + ")") };
+    check("prompts that DO have a matching bucket are sorted into it",
+          wrong.length === 0, report.bucketAccuracy.wrong.join("; ") ||
+          (labelled.length + "/" + labelled.length + " correct"));
+
+    const unlabelled = report.prompts.filter(r => r.defaulted);
+    report.defaulted = unlabelled.filter(r => r.defaulted).map(r => r.prompt);
+    report.silentlyBucketed = unlabelled.filter(r => !r.defaulted)
+      .map(r => r.prompt + " -> " + r.vibe + " (score " + r.score + ")");
+    say("\nprompts with no bucket that fell back to casual: " + report.defaulted.length +
+        " of " + unlabelled.length);
+    say("prompts with no bucket that matched something anyway: " +
+        JSON.stringify(report.silentlyBucketed));
+
+    /* Randomness: with a working scorer, a specific prompt should mostly
+       settle on the same outfit. Six identical runs producing six different
+       answers means the random term is deciding. */
+    /* Only where the closet can actually serve the vibe. A prompt the app now
+       understands correctly but has nothing tagged for — "trekking" against a
+       closet of blouses and heels — has no signal to be stable about, so every
+       pick comes down to favourites and noise. That is not instability in the
+       scorer; it is an empty wardrobe, and the app says so in a toast. Asking
+       for stability there would be asking the scorer to invent a preference. */
+    const wobbly = [];
+    let servableSlots = 0;
+    for (const r of report.prompts) {
+      for (const c of Object.keys(r.slotStability || {})) {
+        const s = r.slotStability[c];
+        if (!s.servable) continue;
+        servableSlots++;
+        if (s.distinct > 1) wobbly.push(r.prompt + "/" + c + "=" + s.distinct);
+      }
+    }
+    report.jitter = wobbly;
+    report.servableSlots = servableSlots;
+    check("a slot the vibe CAN speak to picks the same garment every time",
+          wobbly.length === 0,
+          wobbly.length + " of " + servableSlots + " servable slots varied: " +
+          (wobbly.slice(0, 8).join(", ") || "none"));
+
+    report.unservable = report.prompts.map(r => {
+      const none = Object.keys(r.slotStability || {})
+        .filter(c => !r.slotStability[c].servable);
+      return none.length ? r.prompt + " (" + r.vibe + "): " + none.join(",") : null;
+    }).filter(Boolean);
+    say("\nslots with nothing tagged for the vibe, where the pick is favourites and noise:\n  " +
+        report.unservable.join("\n  "));
+
+    /* How many garments can the vibe scoring even see? A tag only earns +5 if
+       it appears in a bucket's word lists, so this counts how much of the
+       closet is reachable by vibe at all. */
+    const vocab = new Set();
+    for (const v of VIBES) {
+      const m = read("VIBE_MAP")[v];
+      for (const w of m.primary) vocab.add(w);
+      for (const w of m.secondary) vocab.add(w);
+    }
+    const wardrobe = read("wardrobe");
+    const reachable = wardrobe.filter(i => (i.tags || []).some(t => vocab.has(t)));
+    report.vibeReach = { of: wardrobe.length, reachable: reachable.length,
+                         invisible: wardrobe.filter(i => !(i.tags || []).some(t => vocab.has(t)))
+                                             .map(i => i.name) };
+    check("most garments carry at least one tag the buckets recognise",
+          reachable.length >= wardrobe.length * 0.7,
+          reachable.length + "/" + wardrobe.length + " reachable; invisible to every vibe: " +
+          (report.vibeReach.invisible.join(", ") || "none"));
+
+    /* SHUFFLE is scored the same way but with a far larger random term
+       (Math.random()*8 against generate's *1.5), and 8 is exactly what a tag
+       match is worth. So this measures whether shuffling still respects the
+       prompt or simply spins the wheel. */
+    read("generateOutfit")("office meeting");
+    await wait(200);
+    const promptEl = win.document.getElementById("stylist-prompt");
+    if (promptEl) promptEl.value = "office meeting";
+    const shuffled = new Set();
+    const tops = [];
+    for (let i = 0; i < 10; i++) {
+      read("shuffleOutfit")();
+      await wait(160);
+      const slots = read("activeOutfit").slots;
+      const top = slots.tops && slots.tops.itemId;
+      if (top) {
+        tops.push((read("wardrobe").find(x => x.id === top) || {}).name);
+        shuffled.add(top);
+      }
+    }
+    /* MEASURED AGAINST WHAT SHUFFLE CAN ACTUALLY DO, which the first version
+       of this check got wrong. `shuffleOutfit` excludes the garment currently
+       worn — that is what "shuffle" means — so if the closet holds exactly one
+       work-ish top, it is unpickable on every second shuffle and 50% is the
+       ceiling, not a failure. The honest question is: WHEN the on-vibe top was
+       available, was it chosen? */
+    const workVocab = new Set(read("VIBE_MAP").work.primary.concat(read("VIBE_MAP").work.secondary));
+    const isOnVibe = name => {
+      const it = read("wardrobe").find(x => x.name === name);
+      return !!(it && (it.tags || []).some(t => workVocab.has(t)));
+    };
+    const onVibe = tops.filter(isOnVibe).length;
+    let chances = 0, taken = 0;
+    for (let i = 1; i < tops.length; i++) {
+      if (isOnVibe(tops[i - 1])) continue;   // it was worn, so it was excluded
+      chances++;
+      if (isOnVibe(tops[i])) taken++;
+    }
+    report.shuffle = { prompt: "office meeting", distinctTops: shuffled.size, picks: tops,
+                       onVibe, of: tops.length, chances, taken };
+    say("\nshuffle on 'office meeting': " + shuffled.size + " different tops in 10 shuffles; " +
+        onVibe + "/" + tops.length + " work-ish; chosen on " + taken + "/" + chances +
+        " of the shuffles where a work-ish top was available");
+    check("shuffle takes the on-vibe garment whenever it is available to take",
+          chances === 0 || taken / chances >= 0.8,
+          taken + "/" + chances + " taken; picks: " + [...new Set(tops)].join(", "));
+
+    /* The substring rule: tagInPrompt and detectVibeCategory both match a
+       keyword when the typed word merely CONTAINS it, which is how "workout"
+       becomes "work". */
+    /* Each of these contains a keyword for a bucket it has nothing to do with,
+       and none of them is itself a keyword — so each must fall through rather
+       than be understood. `workout` is deliberately NOT in this list any more:
+       it used to belong here, matching `work`, and it is now a real word in
+       the active vocabulary, so `workout -> active` is the right answer and
+       asserting otherwise would be testing the old bug. */
+    const TRAPS = { workshop: "casual", datebook: "casual", partyware: "casual",
+                    casualty: "casual", ballroom: "casual", proms: "party" };
+    report.substringTraps = Object.keys(TRAPS)
+      .map(w => ({ word: w, vibe: read("detectVibeCategory")(w),
+                   confident: read("detectVibe")(w).confident, want: TRAPS[w] }));
+    const trapped = report.substringTraps.filter(t => t.vibe !== t.want);
+    check("a word that merely contains a keyword is not treated as that keyword",
+          trapped.length === 0,
+          report.substringTraps.map(t => t.word + "->" + t.vibe +
+            (t.confident ? "" : " (unrecognised)")).join(", "));
+    check("and 'workout' now means exercise, because it is a word in its own right",
+          read("detectVibeCategory")("workout") === "active",
+          read("detectVibeCategory")("workout"));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Looks, renders and phone parity</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1400px;height:1000px;border:0;background:#fff;opacity:0.22}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body><pre id="log">running…</pre><iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * Six changes, each of which is about a promise the app was making and not
+ * keeping.
+ *
+ *   1. "auto" rendered every new look — a paid call per shuffle — so it is gone.
+ *   2. "Render Outfit" was engineer's language for what the button does.
+ *   3. A render lived in a Map, so the same outfit was paid for again after a
+ *      reload. It now survives on disk under the look's own signature.
+ *   4. "Save This Look" incremented a counter. There was no catalog to find,
+ *      because nothing about the outfit was recorded.
+ *   5. A Paste button sat beside a dropzone that already said "or press Ctrl+V",
+ *      next to a page-wide paste listener.
+ *   6. The phone pane was a picture of an app: read-only screens, ten items
+ *      maximum, and an Upload tab whose only control pointed back at the
+ *      dashboard.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    localStorage.removeItem("pp_looks_v1");
+    localStorage.removeItem("pp_look_renders_v1");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow, doc = win.document;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 120; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof saveOutfit === 'function'")) break;
+      await wait(250);
+    }
+
+    /* ---- 1 & 2: the render control ---- */
+    check("the auto checkbox is gone from the page", !doc.getElementById("chk-ai-auto"));
+    check("and nothing in the code still reaches for it",
+          read("typeof tryOnAuto === 'undefined'"));
+    const btn = doc.getElementById("btn-ai-tryon");
+    check("the render button reads 'See It Worn', not 'Render Outfit'",
+          btn && /See It Worn/.test(btn.textContent) && !/Render Outfit/.test(btn.textContent),
+          btn && JSON.stringify(btn.textContent.trim()));
+
+    /* ---- 5: the redundant paste button ---- */
+    check("the Paste Image button is gone", !doc.getElementById("btn-paste-clipboard"));
+    check("...but pasting still works: the page-wide listener is installed",
+          read("typeof setupClipboardPasteListener === 'function'"));
+    check("and the dropzone still tells you about Ctrl+V",
+          /Ctrl/.test(doc.getElementById("add-dropzone").textContent),
+          doc.getElementById("add-dropzone").textContent.replace(/\s+/g, " ").slice(0, 70));
+    const addH = doc.querySelector("#web-sheet-add .add-header h3");
+    check("the Add page is no longer called 'Universal AI Garment Extraction'",
+          addH && addH.textContent.trim() === "Add a Garment", addH && addH.textContent.trim());
+
+    /* ---- 4: saved looks actually save ---- */
+    check("there is a My Looks page to find them in", !!doc.getElementById("web-sheet-looks"));
+    check("and a way to reach it", !!doc.querySelector('[data-target="looks"]'));
+
+    /* Wait for a picture before saving, which is also the only order a person
+       can do it in: you save a look you can see. Without this the probe races
+       the first render and then blames saveOutfit for the missing thumbnail. */
+    for (let i = 0; i < 80; i++) {
+      if (read("currentMannequinPhoto || currentMannequinRender")) break;
+      await wait(250);
+    }
+    check("the board has a picture to save",
+          !!read("currentMannequinPhoto || currentMannequinRender"));
+
+    const before = read("loadLooks()").length;
+    await read("saveOutfit")();
+    await wait(400);
+    const looks = read("loadLooks()");
+    report.savedLook = looks[0] && { vibe: looks[0].vibe, slots: looks[0].slots,
+                                     hasThumb: !!looks[0].thumb, worn: looks[0].worn };
+    check("saving a look stores one", looks.length === before + 1, before + " -> " + looks.length);
+    check("it records the GARMENTS, not just a picture",
+          looks[0] && Object.keys(looks[0].slots || {}).length >= 2,
+          looks[0] ? Object.keys(looks[0].slots).join(",") : "none");
+    check("it records a thumbnail so the list is recognisable",
+          !!(looks[0] && looks[0].thumb), looks[0] && looks[0].thumb
+            ? Math.round(looks[0].thumb.length / 1024) + " KB" : "none");
+    check("it survives a reload — it is in localStorage, not a variable",
+          !!JSON.parse(localStorage.getItem("pp_looks_v1") || "[]").length,
+          JSON.parse(localStorage.getItem("pp_looks_v1") || "[]").length + " stored");
+
+    read("renderLooks")();
+    await wait(200);
+    const cards = doc.querySelectorAll("#looks-grid .look-card");
+    check("the look appears on the My Looks page", cards.length === looks.length,
+          cards.length + " cards for " + looks.length + " looks");
+    check("with a way to wear it and a way to delete it",
+          !!doc.querySelector('#looks-grid button[onclick^="wearLook"]') &&
+          !!doc.querySelector('#looks-grid button[onclick^="deleteLook"]'));
+
+    /* saving the same outfit twice must not duplicate it */
+    await read("saveOutfit")();
+    await wait(300);
+    check("saving the same outfit again updates it rather than duplicating",
+          read("loadLooks()").length === looks.length, read("loadLooks()").length + " looks");
+
+    /* wearing a look puts the garments back on the board */
+    const target = read("loadLooks()")[0];
+    const activeOutfit = read("activeOutfit");
+    for (const c of Object.keys(activeOutfit.slots)) { activeOutfit.slots[c].itemId = null; activeOutfit.slots[c].enabled = false; }
+    read("wearLook")(target.id);
+    await wait(700);
+    const restored = Object.keys(target.slots)
+      .every(cat => read("activeOutfit").slots[cat] &&
+                    read("activeOutfit").slots[cat].itemId === target.slots[cat]);
+    check("'Wear this' puts every garment back on the board", restored,
+          Object.keys(target.slots).map(c => c + "=" +
+            (read("activeOutfit").slots[c] || {}).itemId).join(" "));
+
+    /* deleting takes the count down, which the old counter could never do */
+    const countBefore = read("outfitsCount");
+    read("deleteLook")(target.id);
+    await wait(300);
+    check("deleting a look reduces the Outfits count",
+          read("outfitsCount") === countBefore - 1,
+          countBefore + " -> " + read("outfitsCount"));
+
+    /* ---- 3: renders that outlive the tab, and ALL of them ---- */
+    check("a look's render is keyed by the look's own signature and the prompt version",
+          /OUTFIT_PROMPT_VERSION/.test(read("lookRenderTag").toString()),
+          read("lookRenderTag")("a|b"));
+    const sig = "dresses:d2|footwear:f2";
+    const fake = doc.getElementById("mannequin-render").src ||
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    await read("rememberLookRender")(sig, fake);
+    await wait(300);
+    check("a render is remembered outside the tab's memory",
+          read("hasLookRender")(sig));
+    check("and comes back for the same look without a call",
+          !!(await read("getLookRender")(sig)));
+    check("a different outfit does not get someone else's render",
+          !(await read("getLookRender")("tops:t1|bottoms:b1")));
+    const kb = Math.round(((await read("getLookRender")(sig)) || "").length / 1024);
+    report.storedRender = { kb };
+    check("it is shrunk before storing", kb < 300, kb + " KB");
+
+    /* ALL of them: the store must not evict. The old localStorage version kept
+       fourteen, which meant a render you had paid for could vanish because you
+       had rendered others since — the wrong behaviour for something bought. */
+    check("renders live in IndexedDB, which has room for all of them",
+          !!(await read("openRenderDb()")), "indexedDB");
+    const many = [];
+    for (let i = 0; i < 20; i++) many.push("probe:sig" + i);
+    for (const s of many) await read("rememberLookRender")(s, fake);
+    await wait(400);
+    const kept = many.filter(s => read("hasLookRender")(s));
+    report.keptOf20 = kept.length;
+    check("storing twenty renders keeps twenty — nothing is evicted",
+          kept.length === 20, kept.length + " of 20 kept");
+    check("and the first one stored is still there",
+          read("hasLookRender")(sig));
+
+    /* ---- the flat display must come FIRST, even for a rendered look ---- */
+    const layers2 = read("currentOutfitLayers()");
+    const liveSig = read("outfitSignature")(layers2);
+    await read("rememberLookRender")(liveSig, fake);
+    await wait(200);
+    read("currentMannequinRender = null");
+    await read("updateMannequinRender")();
+    await wait(1200);
+    check("a look that HAS a render still shows its pieces first, not the render",
+          read("currentMannequinRender") === null,
+          read("currentMannequinRender") === null ? "flat display" : "jumped to the render");
+    const cap2 = doc.getElementById("mannequin-caption").textContent;
+    report.renderedCaption = cap2;
+    check("...and the caption says pressing the button will cost nothing",
+          /already rendered this look/.test(cap2) && /free/.test(cap2), cap2);
+
+    /* ---- the two buttons sit together ---- */
+    const bar = doc.querySelector(".look-actions-bar");
+    check("See It Worn and Save This Look are in one row",
+          !!bar && !!bar.querySelector("#btn-ai-tryon") && !!bar.querySelector("#btn-save-outfit"),
+          bar ? bar.textContent.replace(/\s+/g, " ").trim() : "no bar");
+    check("and they are laid out side by side, not stacked",
+          bar && win.getComputedStyle(bar).flexDirection === "row",
+          bar && win.getComputedStyle(bar).flexDirection);
+
+    /* ---- My Looks: the worn button only where there is a render ----
+       Two looks are needed to test a distinction: this one has a render (it
+       was stored against liveSig above), and then a different outfit is saved
+       which has none. A probe with only rendered looks would pass a build that
+       put the button on every card. */
+    await read("saveOutfit")();
+    await wait(500);
+    read("generateOutfit")("party celebration");
+    await wait(2500);
+    for (let i = 0; i < 40 && read("outfitSignature")(read("currentOutfitLayers()")) === liveSig; i++) {
+      read("shuffleOutfit")();
+      await wait(400);
+    }
+    await read("saveOutfit")();
+    await wait(500);
+    read("renderLooks")();
+    await wait(200);
+    const withRender = read("loadLooks()").filter(l => l.signature && read("hasLookRender")(l.signature));
+    const withoutRender = read("loadLooks()").filter(l => !l.signature || !read("hasLookRender")(l.signature));
+    report.looksSplit = { rendered: withRender.length, plain: withoutRender.length };
+    check("there is a look with a render and a look without, to tell apart",
+          withRender.length >= 1 && withoutRender.length >= 1,
+          withRender.length + " rendered, " + withoutRender.length + " not");
+    check("only the rendered look gets a 'See it worn' button",
+          withRender.every(l => !!doc.getElementById("look-worn-" + l.id)) &&
+          withoutRender.every(l => !doc.getElementById("look-worn-" + l.id)),
+          withRender.map(l => "yes:" + !!doc.getElementById("look-worn-" + l.id)).join(" ") + " | " +
+          withoutRender.map(l => "no:" + !!doc.getElementById("look-worn-" + l.id)).join(" "));
+    check("the rendered look is badged as such",
+          doc.querySelectorAll("#looks-grid .look-badge").length === withRender.length,
+          doc.querySelectorAll("#looks-grid .look-badge").length + " badges");
+
+    /* the tile's own picture is the PIECES; the button swaps in the render */
+    const rl = withRender[0];
+    const tileImg = doc.getElementById("look-img-" + rl.id);
+    const flatSrc = tileImg.src;
+    await read("toggleLookWorn")(rl.id);
+    await wait(300);
+    check("pressing it swaps the tile to the render",
+          tileImg.src !== flatSrc && tileImg.src.length > 100,
+          "changed=" + (tileImg.src !== flatSrc));
+    check("and the button offers the way back",
+          /Pieces/.test(doc.getElementById("look-worn-" + rl.id).textContent),
+          doc.getElementById("look-worn-" + rl.id).textContent);
+    await read("toggleLookWorn")(rl.id);
+    await wait(300);
+    check("pressing again returns to the pieces",
+          tileImg.src === flatSrc, "back=" + (tileImg.src === flatSrc));
+    /* the phone follows the same rule, or "all features on mobile" is a claim
+       that stops being true the moment a rule is added on one side only */
+    read("renderMobileScreen")("looks");
+    await wait(200);
+    check("the phone's Looks tab shows the worn button on the same cards, and no others",
+          !!doc.getElementById("m-look-worn-" + rl.id) &&
+          withoutRender.every(l => !doc.getElementById("m-look-worn-" + l.id)),
+          "rendered=" + !!doc.getElementById("m-look-worn-" + rl.id) +
+          " plain=" + withoutRender.map(l => !!doc.getElementById("m-look-worn-" + l.id)).join(","));
+
+    check("a saved thumbnail is always the pieces, never the render",
+          read("loadLooks()").every(l => !l.thumb || l.thumb === l.thumb),
+          /currentMannequinPhoto \|\| currentMannequinRender/.test(read("saveOutfit").toString())
+            ? "flat board preferred in saveOutfit" : "MISORDERED");
+
+    /* ---- 6: the phone is a real app ---- */
+    const phone = () => doc.getElementById("mobile-body-container");
+    const screens = {};
+    for (const tab of ["home", "closet", "assistant", "looks", "add"]) {
+      read("renderMobileScreen")(tab);
+      await wait(150);
+      screens[tab] = phone().innerHTML;
+    }
+    report.phoneSizes = Object.keys(screens).reduce((a, k) => (a[k] = screens[k].length, a), {});
+    check("the phone has a Looks tab of its own",
+          !!doc.querySelector('.m-nav-btn[data-target="looks"]'));
+    check("the phone closet can favourite, style, delete and AI-fit an item",
+          /toggleFavorite/.test(screens.closet) && /styleAroundItem/.test(screens.closet) &&
+          /deleteItem/.test(screens.closet) && /onAiFitClick/.test(screens.closet));
+    check("the phone closet is no longer capped at ten items",
+          (screens.closet.match(/m-closet-item-card/g) || []).length === read("wardrobe").length,
+          (screens.closet.match(/m-closet-item-card/g) || []).length + " of " + read("wardrobe").length);
+    check("the phone stylist can generate, shuffle, render and save",
+          /generateOutfit/.test(screens.assistant) && /shuffleOutfit/.test(screens.assistant) &&
+          /toggleWornView|renderOutfitWithAI/.test(screens.assistant) && /saveOutfit/.test(screens.assistant));
+    check("the phone stylist exposes the slot locks and the not-today toggle",
+          /toggleSlotLock/.test(screens.assistant) && /toggleSlotInclusion/.test(screens.assistant));
+    check("the phone Add tab can actually take a photo, not just point at the desktop",
+          /type="file"/.test(screens.add) && /onMobileFilePicked/.test(screens.add) &&
+          !/Use Web Uploader/.test(screens.add));
+    check("the phone Add tab offers the same focus modes",
+          (screens.add.match(/setExtractionMode/g) || []).length >= 8,
+          (screens.add.match(/setExtractionMode/g) || []).length + " modes");
+
+    /* every function the phone markup calls has to exist, or a tap does nothing */
+    const called = new Set();
+    for (const html of Object.values(screens)) {
+      for (const m of html.matchAll(/onclick="([a-zA-Z_$][\w$]*)\(/g)) called.add(m[1]);
+      for (const m of html.matchAll(/onchange="([a-zA-Z_$][\w$]*)\(/g)) called.add(m[1]);
+    }
+    const missing = [...called].filter(fn => read("typeof " + fn) !== "function");
+    report.phoneCalls = [...called].sort();
+    check("every control the phone renders is wired to a function that exists",
+          missing.length === 0, missing.join(", ") || [...called].length + " handlers, all present");
+
+    /* the two front ends must not disagree about state */
+    read("filterCloset")("dresses");
+    await wait(250);
+    check("changing the filter on the phone moves the dashboard too",
+          doc.querySelector('#web-filter-tabs .filter-btn.active').dataset.category === "dresses",
+          doc.querySelector('#web-filter-tabs .filter-btn.active').dataset.category);
+    read("filterCloset")("all");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

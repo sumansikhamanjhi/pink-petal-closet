@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Box-guided isolation stages</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}canvas{margin:3px;max-height:300px}</style></head>
+<body>
+<pre id="log">running…</pre>
+<div id="out"></div>
+<script src="../garment-engine.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const q = new URLSearchParams(location.search);
+
+// boxes measured off the fixture run, so this debugs segmentation alone with no
+// vision-model call and no quota spent
+const CASES = [
+  { id: "d1", file: "../assets/floral_white_dress.jpg",   region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  { id: "t6", file: "../assets/white_ribbed_top.jpg",     region: { x: 0.192, y: 0.123, w: 0.615, h: 0.733 } },
+  { id: "f1", file: "../assets/cream_retro_sneakers.jpg", region: { x: 0.098, y: 0.251, w: 0.817, h: 0.541 } }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+function paint(w, h, get) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d");
+  const d = c.createImageData(w, h);
+  for (let p = 0; p < w * h; p++) {
+    const v = get(p);
+    d.data[p * 4] = v[0]; d.data[p * 4 + 1] = v[1]; d.data[p * 4 + 2] = v[2]; d.data[p * 4 + 3] = 255;
+  }
+  c.putImageData(d, 0, 0);
+  return cv;
+}
+
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    const PW = 260, PH = 300, PANELS = 5;
+    const sheet = document.createElement("canvas");
+    sheet.width = PANELS * PW;
+    sheet.height = CASES.length * PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const cse = CASES[i];
+      const entry = { id: cse.id };
+      const img = await load(cse.file);
+      const res = await GarmentEngine.extractObject(img, { region: cse.region, debug: true, padding: 4 });
+      const d = res._debug, W = d.w, H = d.h;
+      entry.metrics = res.metrics;
+      entry.lowContrast = d.lowContrast;
+      entry.warnings = res.warnings;
+
+      const panels = [
+        ["source", null],
+        ["seeds", paint(W, H, p => d.fgSeed[p] ? [60, 230, 120] : (d.bgSeed[p] ? [230, 60, 60] : [22, 22, 30]))],
+        ["bg distance", paint(W, H, p => {
+          const v = Math.min(255, Math.round(d.bgDistance[p] * 6));
+          return [v, v, v];
+        })],
+        ["grow", paint(W, H, p => d.grow[p] ? [255, 255, 255] : [0, 0, 0])],
+        ["alpha", paint(W, H, p => {
+          const v = Math.round(d.alpha[p] * 255);
+          return [v, v, v];
+        })]
+      ];
+
+      for (let k = 0; k < panels.length; k++) {
+        const [name, cv] = panels[k];
+        const x = k * PW, y = i * PH + 16;
+        if (cv) {
+          const s = Math.min(PW / cv.width, (PH - 20) / cv.height);
+          sc.drawImage(cv, x + (PW - cv.width * s) / 2, y, cv.width * s, cv.height * s);
+        } else {
+          const s = Math.min(PW / img.width, (PH - 20) / img.height);
+          sc.drawImage(img, x + (PW - img.width * s) / 2, y, img.width * s, img.height * s);
+          sc.strokeStyle = "#ff2cc0";
+          sc.lineWidth = 2;
+          sc.strokeRect(x + (PW - img.width * s) / 2 + cse.region.x * img.width * s,
+                        y + cse.region.y * img.height * s,
+                        cse.region.w * img.width * s, cse.region.h * img.height * s);
+        }
+        sc.fillStyle = "#8ad";
+        sc.font = "11px monospace";
+        sc.fillText((k === 0 ? cse.id + " " : "") + name, x + 4, i * PH + 12);
+      }
+      report.cases.push(entry);
+      say();
+    }
+    await post("/save?name=object_debug.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

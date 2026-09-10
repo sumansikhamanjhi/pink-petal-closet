@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Body model check</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+canvas{max-height:900px}</style></head>
+<body>
+<div id="out"></div>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * The candidate body model, read off the measuring grid: half-width of the
+ * TORSO/LEG at each height, as fractions of the image. Drawn over the photo so
+ * it can be checked by eye and corrected before anything is built on it.
+ */
+const BODY = {
+  centreX: 0.518,
+  profile: [
+    [0.100, 0.052, "head top"],
+    [0.140, 0.062, "head"],
+    [0.190, 0.040, "chin"],
+    [0.220, 0.036, "neck"],
+    [0.250, 0.135, "shoulder"],
+    [0.280, 0.132, "chest"],
+    [0.310, 0.128, "bust"],
+    [0.350, 0.112, "underbust"],
+    [0.405, 0.095, "waist"],
+    [0.440, 0.115, "upper hip"],
+    [0.462, 0.125, "hip"],
+    [0.500, 0.118, "crotch"],
+    [0.560, 0.104, "thigh"],
+    [0.640, 0.086, "above knee"],
+    [0.700, 0.072, "knee"],
+    [0.760, 0.064, "calf"],
+    [0.840, 0.050, "ankle"],
+    [0.880, 0.055, "foot"],
+    [0.905, 0.075, "floor"]
+  ]
+};
+
+(async function () {
+  const img = new Image();
+  await new Promise(r => { img.onload = r; img.src = "../assets/mannequin_base.jpg"; });
+  const W = 768, H = Math.round(img.naturalHeight * (768 / img.naturalWidth));
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const c = cv.getContext("2d");
+  c.drawImage(img, 0, 0, W, H);
+
+  const cx = BODY.centreX * W;
+  const pts = BODY.profile;
+
+  // filled silhouette from the profile, so any mismatch with the real body shows
+  c.beginPath();
+  c.moveTo(cx - pts[0][1] * W, pts[0][0] * H);
+  for (let i = 1; i < pts.length; i++) c.lineTo(cx - pts[i][1] * W, pts[i][0] * H);
+  for (let i = pts.length - 1; i >= 0; i--) c.lineTo(cx + pts[i][1] * W, pts[i][0] * H);
+  c.closePath();
+  c.fillStyle = "rgba(255,44,192,0.28)";
+  c.fill();
+  c.strokeStyle = "#ff2cc0";
+  c.lineWidth = 2;
+  c.stroke();
+
+  c.font = "12px monospace";
+  for (const [y, half, name] of pts) {
+    c.strokeStyle = "rgba(0,229,255,0.85)";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(cx - half * W - 26, y * H);
+    c.lineTo(cx + half * W + 26, y * H);
+    c.stroke();
+    c.fillStyle = "#00e5ff";
+    c.fillText(name + "  y=" + y + " half=" + half, cx + half * W + 30, y * H + 4);
+  }
+  document.getElementById("out").appendChild(cv);
+  await post("/save?name=body_verify.png", cv.toDataURL("image/png"));
+  await post("/report", JSON.stringify({ ok: true, points: pts.length }));
+})();
+</script>
+</body></html>

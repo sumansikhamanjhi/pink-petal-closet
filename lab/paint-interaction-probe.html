@@ -1,0 +1,149 @@
+<!doctype html><meta charset="utf-8"><title>paint interaction probe</title>
+<style>html,body{margin:0}#f{width:100%;height:100vh;border:0}</style>
+<iframe id="f" src="../index.html"></iframe>
+<script>
+const R = { steps: [] };
+const log = (k,v)=>{ R[k]=v; R.steps.push(k+" = "+JSON.stringify(v)); };
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+async function waitFor(fn, ms){ ms=ms||15000; const t=Date.now(); while(Date.now()-t<ms){ try{ if(fn()) return true; }catch(e){} await sleep(60);} return false; }
+
+function makeImg(w,h,label){
+  const c=document.createElement("canvas"); c.width=w; c.height=h;
+  const x=c.getContext("2d");
+  x.fillStyle="#f2f2f0"; x.fillRect(0,0,w,h);
+  x.fillStyle="#26364f"; x.fillRect(w*0.28,h*0.14,w*0.44,h*0.6);
+  x.fillStyle="#000"; x.font="bold 40px sans-serif"; x.fillText(label,10,50);
+  return c.toDataURL("image/png");
+}
+
+async function measure(win, doc, src, tag){
+  win.eval("currentRawImageSrc = " + JSON.stringify(src) + ";");
+  win.openStudioModal();
+  const canvas = doc.getElementById("crop-canvas");
+  await waitFor(function(){ return canvas.width > 10 && canvas.width !== 300; }, 8000);
+  await sleep(250);
+  const wrapper = doc.getElementById("crop-canvas-wrapper");
+  const cr = canvas.getBoundingClientRect(), wr = wrapper.getBoundingClientRect();
+  const m = {
+    bitmap: [canvas.width, canvas.height],
+    displayed: [+cr.width.toFixed(2), +cr.height.toFixed(2)],
+    cssRatioX: +(cr.width/canvas.width).toFixed(4),
+    cssRatioY: +(cr.height/canvas.height).toFixed(4),
+    offsetLeft: canvas.offsetLeft, offsetTop: canvas.offsetTop,
+    wrapperW: +wr.width.toFixed(2),
+    studioScale: win.eval("studioState.scale"),
+    dpr: win.devicePixelRatio, innerW: win.innerWidth
+  };
+  const cx = cr.left + cr.width/2, cy = cr.top + cr.height/2;
+  const ev = function(t){ return new win.MouseEvent(t,{clientX:cx, clientY:cy, bubbles:true}); };
+  wrapper.dispatchEvent(ev("mousedown")); wrapper.dispatchEvent(ev("mouseup"));
+  await sleep(60);
+  m.hintFromCentreTap = win.eval("JSON.stringify(studioState.hint)");
+  log("geom_"+tag, m);
+  return {canvas: canvas, wrapper: wrapper, cr: cr};
+}
+
+(async function(){
+ try {
+  const f = document.getElementById("f");
+  await new Promise(function(r){ f.onload = r; });
+  const win = f.contentWindow, doc = f.contentDocument;
+  const ok = await waitFor(function(){ return typeof win.openStudioModal === "function"; }, 20000);
+  log("app_loaded", ok);
+  log("headless_viewport", [win.innerWidth, win.innerHeight]);
+
+  await measure(win, doc, makeImg(700,1600,"PORTRAIT"), "portrait");
+  win.closeStudioModal();
+  await measure(win, doc, makeImg(1600,700,"LANDSCAPE"), "landscape");
+
+  f.style.width = "700px";
+  await sleep(400);
+  win.closeStudioModal();
+  await measure(win, doc, makeImg(1600,700,"LAND700"), "landscape_narrow700");
+  f.style.width = "";
+  await sleep(400);
+
+  win.closeStudioModal();
+  await measure(win, doc, makeImg(700,1600,"P2"), "portrait2");
+  const modal = doc.getElementById("crop-modal");
+  const cr2 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  const mr = modal.getBoundingClientRect();
+  let clickTarget = null;
+  const spy = function(e){ clickTarget = e.target.id || e.target.className || e.target.tagName; };
+  win.addEventListener("click", spy, true);
+  const wrap = doc.getElementById("crop-canvas-wrapper");
+  wrap.dispatchEvent(new win.MouseEvent("mousedown",{clientX:cr2.left+cr2.width/2, clientY:cr2.top+cr2.height/2, bubbles:true}));
+  modal.dispatchEvent(new win.MouseEvent("mouseup",{clientX:mr.left+6, clientY:mr.bottom-6, bubbles:true}));
+  modal.dispatchEvent(new win.MouseEvent("click",{clientX:mr.left+6, clientY:mr.bottom-6, bubbles:true}));
+  await sleep(80);
+  log("backdropRelease_clickTarget", clickTarget);
+  log("backdropRelease_modalDisplay", modal.style.display);
+  log("backdropRelease_isDraggingStuck", win.eval("studioState.isDragging"));
+  win.removeEventListener("click", spy, true);
+
+  win.closeStudioModal();
+  await measure(win, doc, makeImg(700,1600,"P3"), "portrait3");
+  const wrap2 = doc.getElementById("crop-canvas-wrapper");
+  let wrapUp=0, winUp=0;
+  const origWrapUp = wrap2.onmouseup, origWinUp = win.onmouseup;
+  wrap2.onmouseup = function(e){ wrapUp++; if(origWrapUp) origWrapUp(e); };
+  win.onmouseup   = function(e){ winUp++;  if(origWinUp)  origWinUp(e);  };
+  const c3 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  wrap2.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c3.left+5, clientY:c3.top+5, bubbles:true}));
+  const panel = doc.querySelector(".studio-selection-panel");
+  panel.dispatchEvent(new win.MouseEvent("mouseup",{clientX:0, clientY:0, bubbles:true}));
+  await sleep(60);
+  log("releaseOutsideWrapper", { wrapperMouseupFired: wrapUp, windowMouseupFired: winUp });
+  wrapUp=0; winUp=0;
+  wrap2.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c3.left+5, clientY:c3.top+5, bubbles:true}));
+  wrap2.dispatchEvent(new win.MouseEvent("mouseup",{clientX:c3.left+9, clientY:c3.top+9, bubbles:true}));
+  await sleep(60);
+  log("releaseInsideWrapper", { wrapperMouseupFired: wrapUp, windowMouseupFired: winUp });
+
+  let pd=0; wrap2.onpointerdown = function(){ pd++; };
+  wrap2.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c3.left+20, clientY:c3.top+20, bubbles:true}));
+  await sleep(40);
+  log("mouseEventFiresPointerdown", pd);
+  let pd2=0; wrap2.onpointerdown = function(){ pd2++; };
+  try { wrap2.dispatchEvent(new win.PointerEvent("pointerdown",{clientX:c3.left+20, clientY:c3.top+20, bubbles:true, pointerId:1, isPrimary:true})); } catch(e){ log("pointerEventCtorError", String(e)); }
+  await sleep(40);
+  log("pointerEventFiresPointerdown", pd2);
+  try { wrap2.setPointerCapture(1); log("setPointerCapture_synthetic","ok"); }
+  catch(e){ log("setPointerCapture_synthetic", e.name + ": " + e.message); }
+  wrap2.onpointerdown = null;
+
+  const wr3 = wrap2.getBoundingClientRect(), c4 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  const gapX = wr3.left + Math.max(2, (c4.left - wr3.left) / 2);
+  log("letterboxGapPx", +(c4.left - wr3.left).toFixed(2));
+  win.eval("studioState.hint = null;");
+  wrap2.dispatchEvent(new win.MouseEvent("mousedown",{clientX:gapX, clientY:wr3.top+wr3.height/2, bubbles:true}));
+  wrap2.dispatchEvent(new win.MouseEvent("mouseup",{clientX:gapX, clientY:wr3.top+wr3.height/2, bubbles:true}));
+  await sleep(60);
+  log("gapTap_hint", win.eval("JSON.stringify(studioState.hint)"));
+  log("gapTap_rawFractionUnclamped", +((gapX - c4.left)/c4.width).toFixed(4));
+
+  wrap2.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c4.left+30, clientY:c4.top+30, bubbles:true}));
+  win.closeStudioModal();
+  log("afterClose_isDragging", win.eval("studioState.isDragging"));
+  log("afterClose_windowOnmouseupStillSet", win.eval("typeof window.onmouseup"));
+
+  win.eval("currentRawImageSrc = " + JSON.stringify(makeImg(400,1200,"SMALL")) + ";");
+  win.openStudioModal();
+  log("immediatelyAfterOpen_staleCanvas", { w: doc.getElementById("crop-canvas").width, h: doc.getElementById("crop-canvas").height, scale: win.eval("studioState.scale") });
+  await waitFor(function(){ return doc.getElementById("crop-canvas").width === 400; }, 6000);
+  log("afterOnload_canvas", { w: doc.getElementById("crop-canvas").width, scale: win.eval("studioState.scale") });
+
+  win.eval("studioState.hint = {x:0.3,y:0.4}; studioState.previewResult = {marker:1}; studioState.scale = 0.42;");
+  win.resetUploadState();
+  log("afterReset_leftovers", win.eval("JSON.stringify({hint:studioState.hint, prevResult: studioState.previewResult && 'present', scale: studioState.scale, box: studioState.box})"));
+
+  log("cropBoxScrimShadow", win.getComputedStyle(doc.getElementById("crop-box")).boxShadow);
+  log("wrapperCursor", win.getComputedStyle(doc.getElementById("crop-canvas-wrapper")).cursor);
+  log("wrapperTouchAction", win.getComputedStyle(doc.getElementById("crop-canvas-wrapper")).touchAction);
+  log("modalBodyOverflowY", win.getComputedStyle(doc.querySelector(".crop-modal-body")).overflowY);
+  log("modalContentMaxHeight", win.getComputedStyle(doc.querySelector(".crop-modal-content")).maxHeight);
+  log("modalBodyScrollable", (function(){ const b=doc.querySelector(".crop-modal-body"); return {scrollH:b.scrollHeight, clientH:b.clientHeight}; })());
+ } catch (err) { R.fatal = String(err && err.stack || err); }
+ await fetch("/report", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(R,null,2) });
+})();
+</script>

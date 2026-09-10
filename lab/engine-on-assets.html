@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Engine on assets</title></head>
+<body>
+<pre id="log"></pre>
+<script src="../garment-engine.js"></script>
+<script>
+const post = (u, b) => fetch(u, { method: "POST", body: b }).catch(e => console.warn(e));
+const ITEMS = [
+  ["assets/pink_knit_top.jpg", "top"],
+  ["assets/dark_skinny_jeans.jpg", "bottom"],
+  ["assets/cream_retro_sneakers.jpg", "footwear"],
+  ["assets/sage_leather_handbag.jpg", "bag"],
+  ["assets/navy_denim_jacket.jpg", "jacket"]
+];
+(async function () {
+  const report = { engine: null, results: [] };
+  try {
+    report.engine = await GarmentEngine.warmup();
+    for (const [file, mode] of ITEMS) {
+      const entry = { file, mode };
+      const t0 = performance.now();
+      try {
+        // exactly how app.js asks for it: a path relative to the page
+        const r = await GarmentEngine.extract("../" + file, { mode, outputMaxDim: 640 });
+        entry.ok = true;
+        entry.ms = Math.round(performance.now() - t0);
+        entry.backend = r.backend;
+        entry.quality = r.metrics.quality;
+        entry.bbox = r.bbox.w + "x" + r.bbox.h;
+        entry.kb = Math.round(r.image.length / 1024);
+        await post("/save?name=asset_" + file.split("/").pop().replace(/\.\w+$/, "") + ".png", r.imagePng);
+      } catch (e) {
+        entry.ok = false;
+        entry.error = String(e && e.message || e);
+      }
+      report.results.push(entry);
+      document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+    }
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Try-on bench — put a garment on the mannequin</title>
+<style>
+  :root{
+    --bg:#0f1014;--panel:#171922;--panel2:#1e212c;--line:#2b2f3d;
+    --ink:#e8eaf0;--dim:#98a0b4;--good:#3ddc84;--bad:#ff5c7a;--warn:#ffc14d;--accent:#8ab4ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;padding:18px}
+  h1{font:600 18px/1.3 ui-sans-serif,system-ui;margin:0 0 4px}
+  h2{font:600 13px/1.3 ui-sans-serif,system-ui;margin:0 0 8px;color:var(--dim);
+     text-transform:uppercase;letter-spacing:.08em}
+  .sub{color:var(--dim);margin:0 0 18px;max-width:82ch}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .grow{flex:1 1 340px;min-width:300px}
+  .drop{background:var(--panel2);border:1px dashed var(--line);border-radius:8px;
+        min-height:150px;display:flex;align-items:center;justify-content:center;
+        text-align:center;color:var(--dim);padding:10px;cursor:pointer;position:relative}
+  .drop.over{border-color:var(--accent);color:var(--accent)}
+  .drop img{max-width:100%;max-height:340px;display:block;border-radius:6px}
+  button{font:600 12px/1 ui-sans-serif,system-ui;background:var(--panel2);color:var(--ink);
+         border:1px solid var(--line);border-radius:7px;padding:9px 13px;cursor:pointer}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button:disabled{opacity:.45;cursor:default;border-color:var(--line);color:var(--dim)}
+  button.primary{background:#22304d;border-color:#33507f;color:#cfe0ff}
+  select,input[type=text]{font:12px ui-monospace,monospace;background:var(--panel2);color:var(--ink);
+         border:1px solid var(--line);border-radius:7px;padding:8px}
+  textarea{width:100%;height:190px;background:#0c0d11;color:#cfe0ff;border:1px solid var(--line);
+           border-radius:8px;padding:10px;font:11px/1.5 ui-monospace,monospace;resize:vertical}
+  table{border-collapse:collapse;width:100%;font-size:12px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:600}
+  .v-good{color:var(--good)}.v-bad{color:var(--bad)}.v-warn{color:var(--warn)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700}
+  .pill.good{background:rgba(61,220,132,.15);color:var(--good)}
+  .pill.bad{background:rgba(255,92,122,.15);color:var(--bad)}
+  .pill.warn{background:rgba(255,193,77,.15);color:var(--warn)}
+  .hint{color:var(--dim);font-size:11px;margin-top:6px}
+  .shots{display:flex;gap:12px;flex-wrap:wrap}
+  .shot{text-align:center}
+  .shot canvas,.shot img{max-height:420px;max-width:100%;border-radius:8px;display:block;
+        background:#000;border:1px solid var(--line)}
+  .shot span{display:block;color:var(--dim);font-size:11px;margin-top:5px}
+  .log{background:#0c0d11;border:1px solid var(--line);border-radius:8px;padding:10px;
+       max-height:180px;overflow:auto;white-space:pre-wrap;font-size:11px;color:#a9b4cc}
+  ol{margin:6px 0 0 18px;padding:0;color:var(--dim);font-size:12px}
+  ol li{margin-bottom:5px}
+  code{background:#0c0d11;padding:1px 5px;border-radius:4px;color:#cfe0ff}
+</style>
+</head>
+<body>
+
+<h1>Try-on bench</h1>
+<p class="sub">
+  One job, isolated from the app: put the garment from an image onto <em>this</em> mannequin and
+  check the result honestly. Nothing here touches the wardrobe, the stylist or the closet.
+  The point of the bench is the <strong>validation</strong> panel — a generated try-on is only
+  usable if the mannequin came back unaltered, and that is measurable rather than a matter of opinion.
+</p>
+
+<div class="row">
+  <div class="card grow">
+    <h2>1 · Mannequin (input)</h2>
+    <div class="drop" id="drop-mann"><span>drop or click — defaults to assets/mannequin_base.jpg</span></div>
+    <div class="hint" id="mann-info">—</div>
+  </div>
+
+  <div class="card grow">
+    <h2>2 · Garment (input)</h2>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <select id="garment-pick"></select>
+      <button id="btn-load-garment">Load</button>
+    </div>
+    <div class="drop" id="drop-garment"><span>drop, paste or click — or pick one above</span></div>
+    <div class="hint" id="garment-info">—</div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:14px">
+  <div class="card grow" style="flex:1 1 460px">
+    <h2>3 · The instruction</h2>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+      <label style="color:var(--dim);font-size:11px">worn as</label>
+      <select id="worn-as"></select>
+      <label style="color:var(--dim);font-size:11px">handoff</label>
+      <select id="route">
+        <option value="pair">one image (single paste)</option>
+        <option value="two">two images (attach both)</option>
+      </select>
+      <button class="primary" id="btn-copy-ready">Copy paste-ready image</button>
+      <button id="btn-copy">Copy prompt</button>
+    </div>
+    <textarea id="prompt" spellcheck="false"></textarea>
+    <div class="hint">
+      Every line about keeping the mannequin identical is load-bearing: the validation below
+      measures exactly that, and a generator that "improves" the mannequin fails it.
+    </div>
+  </div>
+
+  <div class="card grow" style="flex:1 1 380px">
+    <h2>4 · Get a result</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="primary" id="btn-generate">Generate via local API</button>
+      <button id="btn-open-gemini">Open Gemini ↗</button>
+      <button id="btn-clear">Clear result</button>
+    </div>
+    <div id="api-state" class="hint">checking the proxy…</div>
+    <div class="drop" id="drop-result" style="margin-top:10px;min-height:110px">
+      <span>…or drop / paste the image you generated elsewhere</span>
+    </div>
+    <ol id="steps"></ol>
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>Batch — walk the whole wardrobe</h2>
+  <p class="hint" style="margin-top:0">
+    Two keystrokes per garment. The bench copies the paste-ready image and the prompt for you,
+    you paste them into the chat, copy the answer, and paste it back here — it validates,
+    files the result and moves to the next garment on its own.
+  </p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+    <button id="btn-queue-all">Select all</button>
+    <button id="btn-queue-none">Select none</button>
+    <button class="primary" id="btn-queue-start">Start batch</button>
+    <button id="btn-queue-skip">Skip this one</button>
+    <button id="btn-queue-stop">Stop</button>
+    <button id="btn-export">Export accepted</button>
+    <span id="queue-state" class="hint" style="margin-left:6px">idle</span>
+  </div>
+  <div id="queue-pick" style="display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--dim)"></div>
+  <div id="queue-results" class="shots" style="margin-top:12px"></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>5 · Before and after</h2>
+  <div class="shots" id="shots">
+    <div class="shot"><canvas id="c-before"></canvas><span>before — the bare mannequin</span></div>
+    <div class="shot"><canvas id="c-after"></canvas><span>after — the result</span></div>
+    <div class="shot"><canvas id="c-diff"></canvas><span>what changed (green = on the body, red = off it)</span></div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>6 · Validation</h2>
+  <div id="verdict" style="margin-bottom:10px"><span class="pill warn">no result yet</span></div>
+  <table id="metrics"><thead><tr><th>check</th><th>value</th><th>wanted</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="hint">
+    Drift is the average change in a region the instruction said must not change, on a 0–255 scale.
+    A little is unavoidable — the result is recompressed on the way back. A lot means the model
+    re-rendered the mannequin instead of editing it, and then the try-on is not of your mannequin.
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>Log</h2>
+  <div class="log" id="log">ready.</div>
+</div>
+
+<script>
+/* =========================================================================
+   Standalone. No app modules, no wardrobe, no localStorage. Everything it
+   needs is in this file so it can be judged on its own.
+   ========================================================================= */
+
+const GARMENTS = [
+  "red_cocktail_dress.jpg", "floral_white_dress.jpg", "navy_denim_jacket.jpg",
+  "white_ribbed_top.jpg", "pink_knit_top.jpg", "terracotta_ribbed_top.jpg",
+  "white_linen_blouse.jpg", "black_silk_camisole.jpg", "olive_turtleneck.jpg",
+  "lavender_crop_top.jpg", "sage_pleated_skirt.jpg", "dark_skinny_jeans.jpg",
+  "beige_wide_trousers.jpg", "black_leather_skirt.jpg", "cream_retro_sneakers.jpg",
+  "black_ankle_boots.jpg", "sage_leather_handbag.jpg", "white_crossbody_bag.jpg"
+];
+
+const WORN_AS = {
+  "dress":    "dress, worn over the torso and hanging down over the legs",
+  "top":      "top, worn on the torso with the shoulders on the shoulders",
+  "jacket":   "jacket or coat, worn over the torso with both sleeves on the arms",
+  "bottoms":  "skirt or trousers, worn on the lower body with the waistband at the waist",
+  "shoes":    "pair of shoes, worn on both feet",
+  "bag":      "bag, hanging from one shoulder or held at the side"
+};
+
+const state = { mann: null, garment: null, result: null, garmentName: "" };
+const $ = id => document.getElementById(id);
+const log = m => { const el = $("log"); el.textContent += "\n" + m; el.scrollTop = el.scrollHeight; };
+
+/* ------------------------------------------------------------------ loading */
+
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.crossOrigin = "anonymous";
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error("could not load " + String(src).slice(0, 80)));
+    i.src = src;
+  });
+}
+
+function fileToDataUrl(file) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
+}
+
+function showIn(dropId, img, infoId, note) {
+  const d = $(dropId);
+  d.innerHTML = "";
+  const el = document.createElement("img");
+  el.src = img.src;
+  d.appendChild(el);
+  if (infoId) {
+    $(infoId).textContent = (note ? note + " · " : "") +
+      (img.naturalWidth || img.width) + "×" + (img.naturalHeight || img.height);
+  }
+}
+
+/** Wires a element for click-to-choose and drag-and-drop. */
+function wireDrop(id, onImage) {
+  const d = $(id);
+  d.addEventListener("click", () => {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.accept = "image/*";
+    inp.onchange = async () => {
+      if (inp.files && inp.files[0]) onImage(await loadImage(await fileToDataUrl(inp.files[0])), inp.files[0].name);
+    };
+    inp.click();
+  });
+  d.addEventListener("dragover", e => { e.preventDefault(); d.classList.add("over"); });
+  d.addEventListener("dragleave", () => d.classList.remove("over"));
+  d.addEventListener("drop", async e => {
+    e.preventDefault();
+    d.classList.remove("over");
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) onImage(await loadImage(await fileToDataUrl(f)), f.name);
+  });
+}
+
+/* ------------------------------------------------------------------ prompt */
+
+/**
+ * The two inputs side by side in ONE image.
+ *
+ * This exists purely to collapse the handoff. Attaching two files to a chat
+ * costs two file dialogs per garment, which over a wardrobe is the whole cost
+ * of the exercise; the clipboard will only carry one image at a time, so the
+ * way to get it down to a single paste is to make it a single image. The
+ * mannequin goes on the left at full height and the garment on the right, with
+ * a wide white gutter so neither is mistaken for part of the other.
+ */
+function buildPair() {
+  if (!state.mann || !state.garment) return null;
+  const H = 1024;
+  const mw = Math.round(H * (state.mann.naturalWidth / state.mann.naturalHeight));
+  const gh = Math.round(H * 0.62);
+  const gw = Math.round(gh * (state.garment.naturalWidth / state.garment.naturalHeight));
+  const gap = Math.round(H * 0.06);
+
+  const cv = document.createElement("canvas");
+  cv.width = mw + gap + gw;
+  cv.height = H;
+  const c = cv.getContext("2d");
+  c.fillStyle = "#ffffff";
+  c.fillRect(0, 0, cv.width, cv.height);
+  c.drawImage(state.mann, 0, 0, mw, H);
+  c.drawImage(state.garment, mw + gap, Math.round((H - gh) / 2), gw, gh);
+  return { canvas: cv, mannWidth: mw, mannFraction: mw / cv.width };
+}
+
+function buildPairPrompt() {
+  const worn = WORN_AS[$("worn-as").value] || "garment, worn on the body";
+  const named = state.garmentName ? ('the "' + state.garmentName.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ") + '"')
+                                  : "the garment";
+  return [
+    "This single image contains two things side by side, separated by white space.",
+    "On the LEFT: a photograph of a white mannequin standing in a shop.",
+    "On the RIGHT: " + named + ", photographed on its own.",
+    "",
+    "Edit the LEFT photograph so that the mannequin is wearing the garment from",
+    "the right, as a " + worn + ".",
+    "",
+    "Keep everything else in the left photograph EXACTLY as it is:",
+    "- the identical mannequin: same shape, height, width, pose, position and colour",
+    "- the identical background, floor, shelving and lighting",
+    "- the identical camera angle and framing",
+    "Do not slim, reshape, straighten, smooth, recolour or move the mannequin.",
+    "Do not add a head, hair, face, skin, hands or a human model.",
+    "Do not add any garment or accessory that is not in the right-hand picture.",
+    "",
+    "The garment must look genuinely worn rather than pasted on: following the",
+    "mannequin's own shape, at the correct size for that body, with real folds and",
+    "shadow, and with sleeves and hems where that body's arms and legs actually are.",
+    "",
+    "IMPORTANT: return ONLY the edited left-hand photograph, by itself, cropped to",
+    "its own edges. Keep its original aspect ratio and size — the tall portrait",
+    "shape of the left picture, not the wide shape of this combined one.",
+    "Do not include the garment picture, the white gap, or any side-by-side layout.",
+    "Reply with the image only, not text."
+  ].join("\n");
+}
+
+function buildPrompt() {
+  if ($("route") && $("route").value === "pair") return buildPairPrompt();
+  const worn = WORN_AS[$("worn-as").value] || "garment, worn on the body";
+  const named = state.garmentName ? ('the "' + state.garmentName.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ") + '"')
+                                  : "the garment";
+  return [
+    "Image 1 is a photograph of a white mannequin standing in a shop.",
+    "Image 2 is " + named + ", photographed on its own.",
+    "",
+    "Edit IMAGE 1 so that the mannequin is wearing the garment from image 2, as a " + worn + ".",
+    "",
+    "Keep everything else in image 1 EXACTLY as it is:",
+    "- identical camera angle, framing, crop and output size",
+    "- the identical mannequin: same shape, height, width, pose, position and colour",
+    "- the identical background, floor, shelving and lighting",
+    "Do not slim, reshape, straighten, smooth, recolour or move the mannequin.",
+    "Do not add a head, hair, face, skin, hands or a human model.",
+    "Do not add any garment or accessory that is not in image 2.",
+    "Do not crop, zoom, rotate or change the aspect ratio.",
+    "",
+    "The garment must look genuinely worn rather than pasted on: following the",
+    "mannequin's own shape, at the correct size for that body, with real folds and",
+    "shadow, and with sleeves and hems where that body's arms and legs actually are.",
+    "",
+    "Return the edited image 1 as an image, at its original size. Do not reply with text."
+  ].join("\n");
+}
+
+function refreshPrompt() { $("prompt").value = buildPrompt(); }
+
+/**
+ * Accepts a returned image, cropping off a side-by-side answer if it got one.
+ *
+ * Asking for "only the left-hand photograph" works most of the time and not
+ * always — models like to hand back the layout they were given. That failure is
+ * trivially detectable, because the answer comes back far wider than the
+ * mannequin is, and trivially repairable, because the mannequin is the left
+ * portion at a known fraction. Repairing it silently is much better than
+ * telling someone their perfectly good render is invalid.
+ */
+async function acceptResult(img, note) {
+  const wantAspect = state.mann
+    ? (state.mann.naturalWidth || state.mann.width) / (state.mann.naturalHeight || state.mann.height)
+    : null;
+  const gotAspect = (img.naturalWidth || img.width) / (img.naturalHeight || img.height);
+  let used = img, cropped = false;
+
+  if (wantAspect && gotAspect > wantAspect * 1.45) {
+    const pair = buildPair();
+    // trust the layout's own proportions when we know them, else assume the
+    // mannequin is as wide as its aspect ratio implies at this height
+    const frac = pair ? pair.mannFraction : (wantAspect / gotAspect);
+    const w = Math.round((img.naturalWidth || img.width) * frac);
+    const h = img.naturalHeight || img.height;
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(img, 0, 0, w, h, 0, 0, w, h);
+    used = await loadImage(cv.toDataURL("image/png"));
+    cropped = true;
+    log("the answer came back side by side — cropped the mannequin out of the left "
+        + Math.round(frac * 100) + "%");
+  }
+
+  state.result = used;
+  showIn("drop-result", used, null);
+  log((note || "result loaded") + " · " + (used.naturalWidth || used.width) + "×" +
+      (used.naturalHeight || used.height) + (cropped ? " (auto-cropped)" : ""));
+  evaluate();
+  return { cropped };
+}
+
+/* -------------------------------------------------------------- validation */
+
+function toCanvas(img, w, h) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d", { willReadFrequently: true });
+  c.imageSmoothingQuality = "high";
+  c.drawImage(img, 0, 0, w, h);
+  return cv;
+}
+
+/**
+ * Compares the result against the bare mannequin.
+ *
+ * The garment is wherever the picture changed, so the same difference gives
+ * both halves of the answer: how much garment arrived, and how much of the
+ * mannequin the model could not resist touching. The regions that must not
+ * change are chosen because no garment in the wardrobe reaches them — the head,
+ * the outer background, and the top corners of the room.
+ */
+function validate(baseImg, resultImg) {
+  const W = 512;
+  const H = Math.round(W * (baseImg.naturalHeight || baseImg.height) / (baseImg.naturalWidth || baseImg.width));
+  const a = toCanvas(baseImg, W, H).getContext("2d", { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const b = toCanvas(resultImg, W, H).getContext("2d", { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+
+  const diff = new Float32Array(W * H);
+  for (let p = 0; p < W * H; p++) {
+    let m = 0;
+    for (let c = 0; c < 3; c++) {
+      const d = Math.abs(a[p * 4 + c] - b[p * 4 + c]);
+      if (d > m) m = d;
+    }
+    diff[p] = m;
+  }
+
+  const region = (x0, x1, y0, y1) => {
+    let s = 0, n = 0;
+    for (let y = Math.round(y0 * H); y < Math.round(y1 * H); y++) {
+      for (let x = Math.round(x0 * W); x < Math.round(x1 * W); x++) { s += diff[y * W + x]; n++; }
+    }
+    return n ? s / n : 0;
+  };
+
+  // the noise floor from the outer ring, then a threshold above it
+  const ring = Math.max(2, Math.round(Math.min(W, H) * 0.06));
+  const edge = [];
+  for (let y = 0; y < H; y++) {
+    const r = y < ring || y >= H - ring;
+    for (let x = 0; x < W; x++) {
+      if (!r && x >= ring && x < W - ring) continue;
+      edge.push(diff[y * W + x]);
+    }
+  }
+  edge.sort((p, q) => p - q);
+  const floor = edge.length ? edge[Math.floor(edge.length * 0.97)] : 0;
+  /* Capped, and the cap matters. If the model returns a wholly different
+     picture the border differs enormously, the floor goes up with it, and an
+     uncapped threshold lands above 255 — which nothing can exceed, so the
+     garment measure reads 0% and the verdict says "no garment arrived" about an
+     image that is not even the same room. Capping keeps that measure meaningful
+     and lets the drift rows say what actually went wrong. */
+  const thresh = Math.min(90, Math.max(14, floor * 3.2));
+
+  // the band a garment may occupy at all
+  const cx = 0.5, halfBand = 0.34, yTop = 0.14, yBot = 0.97;
+  let onBody = 0, offBody = 0, bodyTotal = 0;
+  const mask = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const p = y * W + x;
+      const inBand = (y >= yTop * H && y <= yBot * H && Math.abs(x - cx * W) <= halfBand * W);
+      if (inBand) bodyTotal++;
+      if (diff[p] <= thresh) continue;
+      mask[p] = inBand ? 1 : 2;
+      if (inBand) onBody++; else offBody++;
+    }
+  }
+
+  return {
+    W, H, diff, mask, thresh: Math.round(thresh), noiseFloor: Math.round(floor),
+    garmentShare: onBody / Math.max(1, bodyTotal),
+    strayShare: offBody / Math.max(1, W * H - bodyTotal),
+    headDrift: region(0.40, 0.60, 0.09, 0.21),
+    bgDrift: region(0.00, 0.14, 0.05, 0.95),
+    floorDrift: region(0.20, 0.80, 0.94, 1.00),
+    aspectBase: (baseImg.naturalWidth || baseImg.width) / (baseImg.naturalHeight || baseImg.height),
+    aspectResult: (resultImg.naturalWidth || resultImg.width) / (resultImg.naturalHeight || resultImg.height)
+  };
+}
+
+function drawAll(v) {
+  const before = toCanvas(state.mann, v.W, v.H);
+  const cb = $("c-before"); cb.width = v.W; cb.height = v.H;
+  cb.getContext("2d").drawImage(before, 0, 0);
+
+  const ca = $("c-after"); ca.width = v.W; ca.height = v.H;
+  ca.getContext("2d").drawImage(toCanvas(state.result, v.W, v.H), 0, 0);
+
+  const cd = $("c-diff"); cd.width = v.W; cd.height = v.H;
+  const ctx = cd.getContext("2d");
+  const img = ctx.createImageData(v.W, v.H);
+  for (let p = 0; p < v.W * v.H; p++) {
+    const m = v.mask[p];
+    const g = Math.min(255, v.diff[p] * 2);
+    img.data[p * 4]     = m === 2 ? 240 : (m === 1 ? 20 : g * 0.25);
+    img.data[p * 4 + 1] = m === 1 ? 235 : (m === 2 ? 30 : g * 0.25);
+    img.data[p * 4 + 2] = m ? 40 : g * 0.3;
+    img.data[p * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function verdictRow(name, value, wanted, ok) {
+  return "<tr><td>" + name + "</td><td class='" + (ok === null ? "" : ok ? "v-good" : "v-bad") + "'>" +
+         value + "</td><td style='color:var(--dim)'>" + wanted + "</td><td>" +
+         (ok === null ? "" : ok ? "✓" : "✗") + "</td></tr>";
+}
+
+function report(v) {
+  const aspectOk = Math.abs(v.aspectBase - v.aspectResult) < 0.02;
+  const headOk = v.headDrift < 12;
+  const bgOk = v.bgDrift < 12;
+  const floorOk = v.floorDrift < 16;
+  const garmentOk = v.garmentShare > 0.04;
+  const strayOk = v.strayShare < 0.06;
+
+  const rows = [
+    verdictRow("garment arrived on the body", (v.garmentShare * 100).toFixed(1) + "% of the body band", "> 4%", garmentOk),
+    verdictRow("mannequin's head untouched", v.headDrift.toFixed(1), "< 12", headOk),
+    verdictRow("background untouched", v.bgDrift.toFixed(1), "< 12", bgOk),
+    verdictRow("floor untouched", v.floorDrift.toFixed(1), "< 16", floorOk),
+    verdictRow("no stray changes off the body", (v.strayShare * 100).toFixed(1) + "%", "< 6%", strayOk),
+    verdictRow("aspect ratio kept", v.aspectResult.toFixed(3) + " vs " + v.aspectBase.toFixed(3), "same", aspectOk),
+    verdictRow("difference threshold used", String(v.thresh), "noise floor " + v.noiseFloor, null)
+  ].join("");
+  document.querySelector("#metrics tbody").innerHTML = rows;
+
+  /* Order matters. A wholly different picture fails several rows at once, and
+     the most useful thing to say about it is that the mannequin is gone — not
+     that no garment arrived, which is technically true of the difference
+     measure and completely misleading about what happened. So the drift
+     verdict is tested first. */
+  const replaced = !headOk && !bgOk;
+  const hard = [garmentOk, headOk, bgOk, aspectOk];
+  const soft = [floorOk, strayOk];
+  let pill;
+  if (replaced) {
+    pill = "<span class='pill bad'>not usable — this is not your mannequin any more; the model re-rendered the scene</span>";
+  } else if (!aspectOk) {
+    pill = "<span class='pill bad'>not usable — the model cropped or re-framed the image</span>";
+  } else if (!garmentOk) {
+    pill = "<span class='pill bad'>no garment arrived — the model returned the mannequin unchanged, or replied with text</span>";
+  } else if (hard.every(Boolean) && soft.every(Boolean)) {
+    pill = "<span class='pill good'>usable — the mannequin was kept and the garment is on it</span>";
+  } else if (hard.every(Boolean)) {
+    pill = "<span class='pill warn'>usable with reservations — see the failing rows</span>";
+  } else {
+    pill = "<span class='pill bad'>not usable — the model altered the mannequin rather than dressing it</span>";
+  }
+  $("verdict").innerHTML = pill;
+}
+
+function evaluate() {
+  if (!state.mann || !state.result) return;
+  const v = validate(state.mann, state.result);
+  drawAll(v);
+  report(v);
+  log("validated: garment " + (v.garmentShare * 100).toFixed(1) + "% of body band, " +
+      "head drift " + v.headDrift.toFixed(1) + ", bg drift " + v.bgDrift.toFixed(1) +
+      ", threshold " + v.thresh);
+}
+
+/* ------------------------------------------------------------------- the API */
+
+function splitDataUrl(u) {
+  const m = /^data:([^;]+);base64,(.*)$/.exec(u || "");
+  return m ? { mime: m[1], data: m[2] } : null;
+}
+
+function asDataUrl(img, maxDim, mime) {
+  const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height;
+  const s = Math.min(1, maxDim / Math.max(w0, h0));
+  const cv = toCanvas(img, Math.round(w0 * s), Math.round(h0 * s));
+  return cv.toDataURL(mime || "image/png");
+}
+
+async function checkApi() {
+  try {
+    const r = await fetch("/api/tryon/status");
+    const s = await r.json();
+    if (s.mock) {
+      $("api-state").innerHTML = "<span class='v-warn'>proxy is in MOCK mode</span> — it echoes the mannequin back, which the validation will correctly call 'no garment arrived'.";
+    } else if (s.ready) {
+      $("api-state").innerHTML = "proxy ready · model <code>" + s.model + "</code>";
+    } else {
+      $("api-state").innerHTML = "<span class='v-bad'>proxy has no API key</span> — use the paste route.";
+    }
+    $("btn-generate").disabled = !s.ready;
+  } catch (e) {
+    $("api-state").innerHTML = "<span class='v-bad'>proxy not reachable</span> — open this page from the app server (http://localhost:8080/lab/tryon-bench.html). The paste route still works.";
+    $("btn-generate").disabled = true;
+  }
+}
+
+async function generate() {
+  if (!state.mann || !state.garment) { log("need both a mannequin and a garment first"); return; }
+  const btn = $("btn-generate");
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = "generating…";
+  log("calling /api/tryon …");
+  try {
+    const images = [
+      splitDataUrl(asDataUrl(state.mann, 832)),
+      splitDataUrl(asDataUrl(state.garment, 512))
+    ];
+    const res = await fetch("/api/tryon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: $("prompt").value, images })
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.image) {
+      const detail = payload.detail ? String(payload.detail) : "";
+      log("FAILED " + res.status + " " + (payload.error || "") + "\n" + detail.slice(0, 900));
+      if (/limit: 0|RESOURCE_EXHAUSTED|quota/i.test(detail)) {
+        log("\nThat is the free tier refusing image generation outright (limit: 0).\n" +
+            "It needs billing enabled on the Cloud project for this key.\n" +
+            "Until then use Copy prompt + Copy both images and paste the result back here.");
+      }
+      return;
+    }
+    state.result = await loadImage(payload.image);
+    showIn("drop-result", state.result, null);
+    log("result received (" + Math.round(payload.image.length / 1024) + " KB)" + (payload.mock ? " [MOCK]" : ""));
+    evaluate();
+  } catch (e) {
+    log("FAILED " + (e && e.message ? e.message : String(e)));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+  }
+}
+
+/* ---------------------------------------------------------------- the batch */
+
+const queue = { list: [], at: -1, running: false, results: [] };
+
+function refreshSteps() {
+  const single = $("route") && $("route").value === "pair";
+  $("steps").innerHTML = single
+    ? "<li>Press <strong>Copy paste-ready image</strong> — one image and the prompt go to the clipboard.</li>" +
+      "<li>In Gemini: <code>Ctrl+V</code> the image, <code>Ctrl+V</code> the prompt, Enter.</li>" +
+      "<li>Copy the answer and press <code>Ctrl+V</code> anywhere here.</li>"
+    : "<li>Press <strong>Copy paste-ready image</strong> — mannequin copied, garment downloaded, prompt copied.</li>" +
+      "<li>In Gemini: paste the mannequin, attach the downloaded garment, paste the prompt.</li>" +
+      "<li>Copy the answer and press <code>Ctrl+V</code> anywhere here.</li>";
+}
+
+function buildQueuePicker() {
+  const box = $("queue-pick");
+  box.innerHTML = "";
+  GARMENTS.forEach(g => {
+    const id = "q-" + g.replace(/\W/g, "");
+    const label = document.createElement("label");
+    label.style.cssText = "display:flex;gap:5px;align-items:center;cursor:pointer";
+    label.innerHTML = "<input type='checkbox' data-file='" + g + "' id='" + id + "'>" +
+                      g.replace(/\.[^.]+$/, "").replace(/_/g, " ");
+    box.appendChild(label);
+  });
+}
+
+function queueSelection() {
+  return [...document.querySelectorAll("#queue-pick input:checked")].map(i => i.dataset.file);
+}
+
+function wornForFile(f) {
+  return /dress/.test(f) ? "dress" : /jacket|coat/.test(f) ? "jacket"
+       : /skirt|jeans|trouser/.test(f) ? "bottoms" : /sneaker|boot/.test(f) ? "shoes"
+       : /bag/.test(f) ? "bag" : "top";
+}
+
+async function loadGarmentFile(f) {
+  const img = await loadImage("../assets/" + f);
+  state.garment = img;
+  state.garmentName = f;
+  showIn("drop-garment", img, "garment-info", f);
+  $("worn-as").value = wornForFile(f);
+  refreshPrompt();
+}
+
+async function queueShow() {
+  const f = queue.list[queue.at];
+  $("queue-state").innerHTML = "garment " + (queue.at + 1) + " of " + queue.list.length +
+    " — <strong>" + f.replace(/\.[^.]+$/, "").replace(/_/g, " ") + "</strong> · paste the answer when you have it";
+  await loadGarmentFile(f);
+  state.result = null;
+  $("drop-result").innerHTML = "<span>paste the answer for <b>" + f + "</b></span>";
+  document.querySelector("#metrics tbody").innerHTML = "";
+  $("verdict").innerHTML = "<span class='pill warn'>waiting for this garment's result</span>";
+  await copyReady();
+}
+
+async function queueAdvance() {
+  queue.at++;
+  if (queue.at >= queue.list.length) {
+    queue.running = false;
+    const ok = queue.results.filter(r => r.usable).length;
+    $("queue-state").textContent = "done — " + ok + " of " + queue.results.length + " usable";
+    log("batch finished: " + ok + "/" + queue.results.length + " usable");
+    return;
+  }
+  await queueShow();
+}
+
+/** Files the result for the garment just done, then moves on. */
+async function queueRecord() {
+  const f = queue.list[queue.at];
+  const v = validate(state.mann, state.result);
+  const usable = v.garmentShare > 0.04 && v.headDrift < 12 && v.bgDrift < 12 &&
+                 Math.abs(v.aspectBase - v.aspectResult) < 0.02;
+  const thumb = document.createElement("canvas");
+  const th = 150, tw = Math.round(th * v.W / v.H);
+  thumb.width = tw; thumb.height = th;
+  thumb.getContext("2d").drawImage(toCanvas(state.result, v.W, v.H), 0, 0, tw, th);
+
+  queue.results.push({
+    file: f, usable,
+    image: state.result.src,
+    garmentShare: v.garmentShare, headDrift: v.headDrift, bgDrift: v.bgDrift
+  });
+
+  const cell = document.createElement("div");
+  cell.className = "shot";
+  cell.appendChild(thumb);
+  const cap = document.createElement("span");
+  cap.innerHTML = f.replace(/\.[^.]+$/, "").replace(/_/g, " ") + "<br>" +
+    (usable ? "<span class='v-good'>usable</span>" : "<span class='v-bad'>rejected</span>");
+  cell.appendChild(cap);
+  $("queue-results").appendChild(cell);
+
+  log((usable ? "accepted " : "rejected ") + f + " (garment " +
+      (v.garmentShare * 100).toFixed(1) + "%, head " + v.headDrift.toFixed(1) + ")");
+  await queueAdvance();
+}
+
+/* --------------------------------------------------------------------- wiring */
+
+(async function init() {
+  const sel = $("garment-pick");
+  GARMENTS.forEach(g => {
+    const o = document.createElement("option");
+    o.value = g; o.textContent = g.replace(/\.[^.]+$/, "").replace(/_/g, " ");
+    sel.appendChild(o);
+  });
+  const wornSel = $("worn-as");
+  Object.keys(WORN_AS).forEach(k => {
+    const o = document.createElement("option");
+    o.value = k; o.textContent = k;
+    wornSel.appendChild(o);
+  });
+  wornSel.value = "dress";
+
+  wireDrop("drop-mann", (img, name) => {
+    state.mann = img; showIn("drop-mann", img, "mann-info", name || "custom");
+    log("mannequin set" + (name ? " (" + name + ")" : ""));
+    if (state.result) evaluate();
+  });
+  wireDrop("drop-garment", (img, name) => {
+    state.garment = img; state.garmentName = name || "";
+    showIn("drop-garment", img, "garment-info", name || "custom");
+    refreshPrompt();
+    log("garment set" + (name ? " (" + name + ")" : ""));
+  });
+  wireDrop("drop-result", async img => {
+    await acceptResult(img, "result dropped in");
+    if (queue.running && state.result) await queueRecord();
+  });
+
+  $("btn-load-garment").addEventListener("click", async () => {
+    const f = sel.value;
+    try {
+      const img = await loadImage("../assets/" + f);
+      state.garment = img; state.garmentName = f;
+      showIn("drop-garment", img, "garment-info", f);
+      refreshPrompt();
+      // a sensible default for how it should be worn, from the file name
+      const g = /dress/.test(f) ? "dress" : /jacket|coat/.test(f) ? "jacket"
+              : /skirt|jeans|trouser/.test(f) ? "bottoms" : /sneaker|boot/.test(f) ? "shoes"
+              : /bag/.test(f) ? "bag" : "top";
+      wornSel.value = g;
+      refreshPrompt();
+      log("loaded " + f + " (worn as " + g + ")");
+    } catch (e) { log("could not load " + f); }
+  });
+
+  wornSel.addEventListener("change", refreshPrompt);
+
+  async function copyPrompt() {
+    try { await navigator.clipboard.writeText($("prompt").value); return true; }
+    catch (e) { $("prompt").select(); log("select-and-copy the prompt box (clipboard blocked)"); return false; }
+  }
+  $("btn-copy").addEventListener("click", async () => { if (await copyPrompt()) log("prompt copied"); });
+
+  function blobOf(canvas) {
+    return new Promise(res => canvas.toBlob(res, "image/png"));
+  }
+
+  /** Puts the paste-ready picture on the clipboard, and the prompt with it. */
+  async function copyReady() {
+    if (!state.mann || !state.garment) { log("load both images first"); return false; }
+    const single = $("route").value === "pair";
+    try {
+      if (single) {
+        const pair = buildPair();
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": await blobOf(pair.canvas) })]);
+        await copyPrompt();
+        log("one image on the clipboard (mannequin + garment) and the prompt copied — " +
+            "paste the image, then paste the prompt");
+        return true;
+      }
+      const mw = state.mann.naturalWidth || state.mann.width;
+      const mh = state.mann.naturalHeight || state.mann.height;
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": await blobOf(toCanvas(state.mann, mw, mh)) })]);
+      const gw = state.garment.naturalWidth || state.garment.width;
+      const gh = state.garment.naturalHeight || state.garment.height;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await blobOf(toCanvas(state.garment, gw, gh)));
+      a.download = (state.garmentName || "garment").replace(/\.[^.]+$/, "") + ".png";
+      a.click();
+      await copyPrompt();
+      log("mannequin on the clipboard, garment downloaded, prompt copied — attach both");
+      return true;
+    } catch (e) {
+      log("clipboard refused (" + (e && e.message) + ") — the images are still on screen to drag out");
+      return false;
+    }
+  }
+  $("btn-copy-ready").addEventListener("click", copyReady);
+
+  // A link, not an integration: Gemini has no way to accept an attachment
+  // through a URL, so this only saves finding the tab. The clipboard does the
+  // actual carrying.
+  $("btn-open-gemini").addEventListener("click", async () => {
+    await copyReady();
+    window.open("https://gemini.google.com/app", "_blank", "noopener");
+  });
+
+  $("route").addEventListener("change", () => { refreshPrompt(); refreshSteps(); });
+
+  $("btn-clear").addEventListener("click", () => {
+    state.result = null;
+    $("drop-result").innerHTML = "<span>…or drop / paste the image you generated elsewhere</span>";
+    document.querySelector("#metrics tbody").innerHTML = "";
+    $("verdict").innerHTML = "<span class='pill warn'>no result yet</span>";
+    ["c-before", "c-after", "c-diff"].forEach(id => {
+      const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height);
+    });
+    log("result cleared");
+  });
+
+  $("btn-generate").addEventListener("click", generate);
+
+  buildQueuePicker();
+  refreshSteps();
+
+  $("btn-queue-all").addEventListener("click", () =>
+    document.querySelectorAll("#queue-pick input").forEach(i => { i.checked = true; }));
+  $("btn-queue-none").addEventListener("click", () =>
+    document.querySelectorAll("#queue-pick input").forEach(i => { i.checked = false; }));
+
+  $("btn-queue-start").addEventListener("click", async () => {
+    const sel = queueSelection();
+    if (!sel.length) { log("tick some garments first"); return; }
+    queue.list = sel; queue.at = -1; queue.running = true; queue.results = [];
+    $("queue-results").innerHTML = "";
+    log("batch started over " + sel.length + " garments");
+    await queueAdvance();
+  });
+
+  $("btn-queue-skip").addEventListener("click", async () => {
+    if (!queue.running) return;
+    log("skipped " + queue.list[queue.at]);
+    await queueAdvance();
+  });
+
+  $("btn-queue-stop").addEventListener("click", () => {
+    queue.running = false;
+    $("queue-state").textContent = "stopped";
+    log("batch stopped");
+  });
+
+  $("btn-export").addEventListener("click", () => {
+    const ok = queue.results.filter(r => r.usable);
+    if (!ok.length) { log("nothing accepted to export"); return; }
+    ok.forEach((r, i) => {
+      setTimeout(() => {
+        const a = document.createElement("a");
+        a.href = r.image;
+        a.download = "worn_" + r.file.replace(/\.[^.]+$/, "") + ".png";
+        a.click();
+      }, i * 250);   // browsers drop simultaneous downloads
+    });
+    log("exporting " + ok.length + " accepted renders");
+  });
+
+  // Paste anywhere. An image is always the answer to whatever is being asked
+  // for right now, so in batch mode it also files the result and advances.
+  window.addEventListener("paste", async e => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.type && it.type.indexOf("image") === 0) {
+        const img = await loadImage(await fileToDataUrl(it.getAsFile()));
+        await acceptResult(img, "result pasted");
+        if (queue.running && state.result) await queueRecord();
+        return;
+      }
+    }
+  });
+
+  try {
+    state.mann = await loadImage("../assets/mannequin_base.jpg");
+    showIn("drop-mann", state.mann, "mann-info", "mannequin_base.jpg");
+  } catch (e) { log("could not load the default mannequin"); }
+  await $("btn-load-garment").click();
+  refreshPrompt();
+  await checkApi();
+  log("bench ready. With no API quota, use Copy prompt → paste into Gemini/ChatGPT → paste the result back.");
+})();
+</script>
+</body>
+</html>

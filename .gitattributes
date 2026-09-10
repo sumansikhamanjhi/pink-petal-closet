@@ -1,0 +1,15 @@
+# Normalise line endings in history, so a Windows checkout does not show every
+# file as modified. PowerShell keeps CRLF on checkout: some older hosts are
+# unhappy with LF-only .ps1 files.
+* text=auto
+*.ps1 text eol=crlf
+*.js  text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md  text eol=lf
+
+# Binary, so git does not try to convert or diff them.
+*.jpg binary
+*.png binary
+*.webp binary
+*.ico binary

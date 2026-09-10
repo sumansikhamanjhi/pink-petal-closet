@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Garment Isolation — Focus</title>
+<style>body{background:#111;color:#eee;font:13px system-ui;margin:0;padding:14px}
+canvas{background:#222;margin:4px;max-height:420px}</style>
+</head>
+<body>
+<div id="status">running…</div>
+<div id="out"></div>
+<script src="../garment-engine.js"></script>
+<script>
+const q = new URLSearchParams(location.search);
+const FILE = q.get("file") || "testset/dress_white_outdoor.jpg";
+const MODE = q.get("mode") || "dress";
+const TAG  = (q.get("tag") || FILE.split("/").pop().replace(/\.\w+$/, "")) + "_" + MODE;
+const out = document.getElementById("out");
+const post = (u, b) => fetch(u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+function show(name, cv) {
+  out.appendChild(cv);
+  const l = document.createElement("div");
+  l.textContent = name;
+  out.appendChild(l);
+  return post("/save?name=" + encodeURIComponent(TAG + "_" + name + ".png"), cv.toDataURL("image/png"));
+}
+function grayCanvas(w, h, get) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d");
+  const d = c.createImageData(w, h);
+  for (let p = 0; p < w * h; p++) {
+    const v = get(p);
+    d.data[p*4] = v[0]; d.data[p*4+1] = v[1]; d.data[p*4+2] = v[2]; d.data[p*4+3] = 255;
+  }
+  c.putImageData(d, 0, 0);
+  return cv;
+}
+
+(async function () {
+  const report = { file: FILE, mode: MODE };
+  try {
+    await GarmentEngine.warmup();
+    const img = await GarmentEngine._internals.loadImage(FILE);
+    const r = await GarmentEngine.extract(img, { mode: MODE, debug: true });
+    const d = r._debug, w = d.w, h = d.h;
+    report.metrics = r.metrics;
+    report.pieces = r.pieces;
+    report.chosenPiece = r.chosenPiece;
+    report.sel = { index: d.sel.index, scores: d.sel.scores, info: d.sel.info };
+    report.warnings = r.warnings;
+    report.thinDiag = r.thinDiag;
+    report.backend = r.backend;
+    report.anatomy = r.anatomy;
+
+    const sem = d.sem;
+    const COL = [[20,20,28],[60,110,255],[255,150,60],[255,230,80],[60,220,120],[255,60,60]];
+    await show("01_classes", grayCanvas(w, h, p => {
+      const v = [sem.bg[p], sem.hair[p], sem.skin[p], sem.face[p], sem.clothes[p], sem.other[p]];
+      let bi = 0;
+      for (let i = 1; i < 6; i++) if (v[i] > v[bi]) bi = i;
+      return COL[bi];
+    }));
+    await show("02_cleaned_base", grayCanvas(w, h, p => d.cleaned[p] ? [255,255,255] : [0,0,0]));
+    const CL = [[0,0,0],[240,80,140],[80,180,240],[250,200,60],[140,240,120],[200,120,255]];
+    await show("03_clusters", grayCanvas(w, h, p => CL[d.assign[p] % CL.length]));
+    await show("04_hard", grayCanvas(w, h, p =>
+      d.patch[p] ? [255,120,0] : (d.hard[p] ? [255,255,255] : [0,0,0])));
+    if (d.dev) await show("04b_dev", grayCanvas(w, h, p => d.dev[p] ? [255,80,0] : (d.hard[p] ? [70,70,70] : [0,0,0])));
+    await show("05_alpha", grayCanvas(w, h, p => {
+      const v = Math.round(d.alpha[p] * 255);
+      return [v, v, v];
+    }));
+    const cut = new Image();
+    await new Promise(res => { cut.onload = res; cut.onerror = res; cut.src = r.imagePng; });
+    const cv = document.createElement("canvas");
+    cv.width = cut.width; cv.height = cut.height;
+    const cc = cv.getContext("2d");
+    for (let y = 0; y < cv.height; y += 12)
+      for (let x = 0; x < cv.width; x += 12) {
+        cc.fillStyle = ((x/12 + y/12) % 2 === 0) ? "#fff" : "#c9c9d6";
+        cc.fillRect(x, y, 12, 12);
+      }
+    cc.drawImage(cut, 0, 0);
+    await show("06_cutout", cv);
+    document.getElementById("status").textContent = "done";
+  } catch (e) {
+    report.error = String(e && e.stack || e);
+    document.getElementById("status").textContent = "ERROR " + report.error;
+  }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body>
+</html>

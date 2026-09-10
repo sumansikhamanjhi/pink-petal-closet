@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>what tags does an upload get?</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}iframe{width:1200px;height:700px;border:0;opacity:.12}</style></head>
+<body><pre id="log">running…</pre><iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { rows: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+
+/**
+ * MEASURING, not guessing: what tags does adding an item actually produce?
+ *
+ * The complaint is that "chic", "minimal" and "boutique" turn up on almost
+ * everything. Reading buildTagList explains why, but a count over real
+ * photographs is what says how bad it is — and it is also the before-shot if
+ * the tagging is changed.
+ *
+ * Every garment photograph the app ships is run through the app's own
+ * extraction, and the tags it hands the upload form are tallied.
+ */
+const SHOTS = [
+  "assets/terracotta_ribbed_top.jpg", "assets/white_ribbed_top.jpg",
+  "assets/pink_knit_top.jpg", "assets/lavender_crop_top.jpg",
+  "assets/white_linen_blouse.jpg", "assets/black_silk_camisole.jpg",
+  "assets/olive_turtleneck.jpg", "assets/sage_pleated_skirt.jpg",
+  "assets/beige_wide_trousers.jpg", "assets/dark_skinny_jeans.jpg",
+  "assets/black_leather_skirt.jpg", "assets/floral_white_dress.jpg",
+  "assets/red_cocktail_dress.jpg", "assets/navy_denim_jacket.jpg",
+  "assets/cream_retro_sneakers.jpg", "assets/black_ankle_boots.jpg",
+  "assets/sage_leather_handbag.jpg", "assets/white_crossbody_bag.jpg"
+];
+
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 120; i++) {
+      if (read("typeof extractGarment === 'function' && typeof wardrobe !== 'undefined' && wardrobe.length")) break;
+      await wait(250);
+    }
+
+    /* The lab server has no /api/vlm, so an extraction here always falls back
+       to the pixel-only path — which is exactly the path the old measurement
+       was taken on, and the one that has to stand on its own when there is no
+       key. The vision path is measured separately below by stubbing the model
+       with a plausible answer, so both are covered without spending quota. */
+    const tally = {};
+    for (const src of SHOTS) {
+      let res = null, err = null;
+      const mode = /jeans|trousers|skirt/.test(src) ? "bottom"
+                 : /dress/.test(src) ? "dress"
+                 : /jacket/.test(src) ? "jacket"
+                 : /sneaker|boots/.test(src) ? "shoes"
+                 : /bag|handbag|crossbody/.test(src) ? "bag" : "top";
+      try { res = await read("extractGarment")(src, { targetMode: mode }); }
+      catch (e) { err = String(e && e.message || e); }
+      const tags = res ? String(res.tags || "").split(",").map(s => s.trim()).filter(Boolean) : [];
+      report.rows.push({ src: src.replace("assets/", ""), fabric: res && res.fabric,
+                         colorName: res && res.colorName, hex: res && res.color,
+                         family: res && read("colourFamily")(res.color),
+                         tags, error: err });
+      for (const t of tags) tally[t] = (tally[t] || 0) + 1;
+      say(src.replace("assets/", "") + "  ->  " + (err || tags.join(", ")));
+      flush();
+    }
+
+    const n = report.rows.filter(r => !r.error).length;
+    report.total = n;
+    report.tally = Object.keys(tally).sort((a, b) => tally[b] - tally[a])
+      .map(t => ({ tag: t, count: tally[t], share: +(tally[t] / Math.max(1, n)).toFixed(2) }));
+    say("\n--- no vision model: how often each tag appears, over " + n + " garments ---");
+    for (const row of report.tally) {
+      say("  " + String(row.count).padStart(3) + "/" + n + "  " +
+          Math.round(row.share * 100) + "%  " + row.tag);
+    }
+    report.vocabulary = Object.keys(tally).sort();
+    say("\ndistinct tags produced: " + report.vocabulary.length);
+
+    /* --- the same garments, with the vision model answering ---------------
+       Stubbed rather than called: the real endpoint costs quota and does not
+       answer identically twice, and what is under test here is what the app
+       does with an answer, not the model. The stub returns the shape the
+       service promises, including two forbidden words, so the filtering is
+       exercised too. */
+    const STYLE_BY_KIND = {
+      top: ["casual", "everyday", "summer"],
+      bottom: ["work", "smart", "classic"],
+      dress: ["party", "evening", "romantic"],
+      jacket: ["layering", "autumn", "warm"],
+      shoes: ["casual", "comfy", "everyday"],
+      bag: ["work", "smart"]
+    };
+    const MATERIAL_BY_KIND = {
+      top: "Ribbed Knit", bottom: "Stretch Denim", dress: "Silk Chiffon",
+      jacket: "Denim", shoes: "Leather", bag: "Pebbled Leather"
+    };
+    const kindOf = src => /jeans|trousers|skirt/.test(src) ? "bottom"
+                        : /dress/.test(src) ? "dress"
+                        : /jacket/.test(src) ? "jacket"
+                        : /sneaker|boots/.test(src) ? "shoes"
+                        : /bag|handbag|crossbody/.test(src) ? "bag" : "top";
+
+    const vlmTally = {};
+    report.withVision = [];
+    for (const src of SHOTS) {
+      const kind = kindOf(src);
+      // the app's own extraction result, reused so only the vision half changes
+      const row = report.rows.find(r => r.src === src.replace("assets/", ""));
+      if (!row || row.error) continue;
+      const vision = { colorName: null, material: MATERIAL_BY_KIND[kind],
+                       // two banned words planted, to prove the app filters
+                       // what the prompt merely asks for
+                       styleTags: STYLE_BY_KIND[kind].concat(["chic", "versatile"]) };
+      const fake = { category: read("wardrobe")[0].category, fabric: row.fabric,
+                     color: { hex: "#8F9E8B", name: row.colorName } };
+      const tags = String(read("buildTagList")(fake, vision) || "")
+        .split(",").map(s => s.trim()).filter(Boolean);
+      report.withVision.push({ src: row.src, tags });
+      for (const t of tags) vlmTally[t] = (vlmTally[t] || 0) + 1;
+    }
+    const m = report.withVision.length;
+    report.visionTally = Object.keys(vlmTally).sort((a, b) => vlmTally[b] - vlmTally[a])
+      .map(t => ({ tag: t, count: vlmTally[t], share: +(vlmTally[t] / Math.max(1, m)).toFixed(2) }));
+    say("\n--- with a vision model, over " + m + " garments ---");
+    for (const row of report.visionTally) {
+      say("  " + String(row.count).padStart(3) + "/" + m + "  " +
+          Math.round(row.share * 100) + "%  " + row.tag);
+    }
+
+    /* --- the checks that matter --- */
+    report.checks = [];
+    const check = (name, pass, detail) => {
+      report.checks.push({ name, pass: !!pass, detail: detail === undefined ? "" : String(detail) });
+      say((pass ? "  ok  " : " FAIL ") + name + (detail === undefined ? "" : "  [" + detail + "]"));
+    };
+    const banned = ["chic", "boutique", "stylish", "trendy", "versatile", "modern", "sleek"];
+    const allTags = report.rows.flatMap(r => r.tags).concat(report.withVision.flatMap(r => r.tags));
+    check("no banned filler word survives anywhere",
+          banned.every(b => !allTags.includes(b)),
+          banned.filter(b => allTags.includes(b)).join(", ") || "none present");
+    check("nothing is tagged on every single garment any more",
+          report.tally.every(t => t.share < 1) ||
+          report.tally.filter(t => t.share === 1).every(t => t.tag === "top"),
+          report.tally.filter(t => t.share === 1).map(t => t.tag).join(", ") || "nothing at 100%");
+    check("no tag contains a space, which could never be matched",
+          allTags.every(t => !/\s/.test(t)),
+          allTags.filter(t => /\s/.test(t)).join(" | ") || "all single words");
+    /* Two is the honest floor with no vision model: a colour family and a
+       category, both of which are measurements. A plain smooth garment has
+       nothing further that can be told from its pixels, and the old tagger's
+       answer to that was to invent two adjectives. Fewer true tags is the
+       trade being made deliberately; the vision path is what fills them out. */
+    check("every garment gets at least a colour and a category",
+          report.rows.every(r => r.error || r.tags.length >= 2),
+          report.rows.filter(r => !r.error && r.tags.length < 2)
+            .map(r => r.src + "=" + r.tags.length).join(", ") || "all >= 2");
+    check("and with a vision model, at least four",
+          report.withVision.every(r => r.tags.length >= 4),
+          report.withVision.filter(r => r.tags.length < 4)
+            .map(r => r.src + "=" + r.tags.length).join(", ") || "all >= 4");
+    /* The fabric may not be read out of the colour. Three black garments -
+       silk, leather and leather - were all tagged "twill" because the engine
+       returns "Smooth Twill" for anything black. */
+    check("no fabric is inferred from a garment being black",
+          report.rows.filter(r => !r.error && /black|charcoal/i.test(r.colorName || ""))
+                     .every(r => !r.tags.includes("twill")),
+          report.rows.filter(r => !r.error && r.tags.includes("twill"))
+            .map(r => r.src).join(", ") || "no twill from colour");
+    check("the vision model's words reach the tags",
+          report.withVision.every(r => r.tags.some(t =>
+            ["casual","everyday","summer","work","smart","classic","party","evening",
+             "romantic","layering","autumn","warm","comfy"].includes(t))),
+          report.withVision[0] ? report.withVision[0].tags.join(", ") : "none");
+    check("the fabric is named rather than characterised",
+          report.withVision.every(r => r.tags.some(t =>
+            ["leather","denim","knit","ribbed","silk","chiffon"].includes(t))),
+          report.withVision.map(r => r.tags.filter(t =>
+            ["leather","denim","knit","ribbed","silk","chiffon"].includes(t)).join("/")).join(" "));
+    /* The colour family has to be the colour a person would say, and the way
+       to check that is against garments whose colour is not in dispute. These
+       are the ones that caught real errors: three whites read as grey, two
+       blacks as grey, a pink as red, an olive as yellow — and then, after
+       widening "black", a burgundy and a navy read as black. */
+    const EXPECT = {
+      "white_ribbed_top.jpg": "white", "white_linen_blouse.jpg": "white",
+      "floral_white_dress.jpg": "white", "black_silk_camisole.jpg": "black",
+      "black_leather_skirt.jpg": "black", "black_ankle_boots.jpg": "black",
+      "pink_knit_top.jpg": "pink", "olive_turtleneck.jpg": "green",
+      "sage_pleated_skirt.jpg": "green", "dark_skinny_jeans.jpg": "blue",
+      "navy_denim_jacket.jpg": "blue", "red_cocktail_dress.jpg": "red",
+      "beige_wide_trousers.jpg": "beige", "lavender_crop_top.jpg": "purple"
+    };
+    const wrong = report.rows.filter(r => EXPECT[r.src] && r.family && r.family !== EXPECT[r.src])
+      .map(r => r.src.replace(".jpg", "") + ": " + r.family + " should be " + EXPECT[r.src]);
+    report.colourMisses = wrong;
+    check("every garment whose colour is not in dispute reads correctly",
+          wrong.length === 0, wrong.join("; ") || Object.keys(EXPECT).length + " colours correct");
+
+    check("a colour family is tagged, so 'something brown' can match",
+          report.rows.filter(r => !r.error).every(r => r.tags.some(t =>
+            ["white","black","grey","beige","brown","red","orange","yellow",
+             "green","blue","purple","pink"].includes(t))),
+          report.rows.filter(r => !r.error && !r.tags.some(t =>
+            ["white","black","grey","beige","brown","red","orange","yellow",
+             "green","blue","purple","pink"].includes(t))).map(r => r.src).join(", ") || "all have one");
+    report.passed = report.checks.filter(c => c.pass).length;
+    report.failed = report.checks.filter(c => !c.pass).length;
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

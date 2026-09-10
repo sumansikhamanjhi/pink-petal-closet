@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLM-guided extraction</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+pre{white-space:pre-wrap}canvas{max-width:100%;margin:4px}</style></head>
+<body>
+<pre id="log">running…</pre>
+<div id="out"></div>
+<script src="../garment-engine.js"></script>
+<script src="../vlm-service.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+const CASES = [
+  "../assets/cream_retro_sneakers.jpg",
+  "../assets/white_ribbed_top.jpg",
+  "../assets/white_linen_blouse.jpg",
+  "../assets/floral_white_dress.jpg",
+  "../assets/sage_leather_handbag.jpg",
+  "../assets/black_ankle_boots.jpg",
+  "../assets/sage_pleated_skirt.jpg",
+  "testset/dress_white_outdoor.jpg"
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+/** source | old engine result | VLM-guided result, on a checkerboard */
+function sheetRow(sc, y, W, H, img, oldUrl, newUrl, label) {
+  const cell = (i) => i * (W + 8);
+  const put = async (url, x) => {
+    if (!url) return;
+    const im = await load(url);
+    const s = Math.min(W / im.width, H / im.height);
+    const dw = im.width * s, dh = im.height * s;
+    const dx = cell(x) + (W - dw) / 2, dy = y + (H - dh) / 2;
+    for (let yy = 0; yy < H; yy += 10)
+      for (let xx = 0; xx < W; xx += 10) {
+        sc.fillStyle = ((xx / 10 + yy / 10) % 2 === 0) ? "#fff" : "#d6d6de";
+        sc.fillRect(cell(x) + xx, y, 10, 10);
+      }
+    sc.drawImage(im, dx, dy, dw, dh);
+  };
+  const s0 = Math.min(W / img.width, H / img.height);
+  sc.drawImage(img, cell(0) + (W - img.width * s0) / 2, y + (H - img.height * s0) / 2,
+               img.width * s0, img.height * s0);
+  sc.fillStyle = "#fff";
+  sc.font = "12px monospace";
+  sc.fillText(label, cell(0) + 4, y + 12);
+  return Promise.all([put(oldUrl, 1), put(newUrl, 2)]);
+}
+
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    await GarmentEngine.warmup();
+    const W = 300, H = 300;
+    const sheet = document.createElement("canvas");
+    sheet.width = 3 * W + 16;
+    sheet.height = CASES.length * (H + 8);
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const file = CASES[i];
+      const entry = { file: file.split("/").pop() };
+      let img = null, oldUrl = null, newUrl = null;
+      try {
+        img = await load(file);
+
+        // how it behaves today: the pixel engine guessing on its own
+        try {
+          const before = await GarmentEngine.extract(img, { mode: "auto" });
+          oldUrl = before.imagePng;
+          entry.old = { backend: before.backend, quality: before.metrics.quality,
+                        bbox: before.bbox.w + "x" + before.bbox.h };
+        } catch (e) { entry.old = { error: String(e && e.message || e) }; }
+
+        // VLM says what and where, then the box-guided matte cuts it out
+        const a = await VlmService.analyzeGarment(img);
+        entry.vlm = { label: a.label, category: a.category, onBody: a.onBody,
+                      region: a.region && { x: +a.region.x.toFixed(2), y: +a.region.y.toFixed(2),
+                                            w: +a.region.w.toFixed(2), h: +a.region.h.toFixed(2) } };
+        if (a.onBody) {
+          const hint = { x: a.region.x + a.region.w / 2, y: a.region.y + a.region.h / 2 };
+          const res = await GarmentEngine.extract(img, { mode: a.category === "dresses" ? "dress" : "auto", hintPoint: hint });
+          newUrl = res.imagePng;
+          entry.now = { path: "person+hint", quality: res.metrics.quality, bbox: res.bbox.w + "x" + res.bbox.h };
+        } else {
+          const res = await GarmentEngine.extractObject(img, { region: a.region, category: a.category });
+          newUrl = res.imagePng;
+          entry.now = { path: "box-guided", quality: res.metrics.quality,
+                        bbox: res.bbox.w + "x" + res.bbox.h, boxFill: res.metrics.boxFill,
+                        warnings: res.warnings };
+        }
+      } catch (e) {
+        entry.error = String(e && e.message || e);
+      }
+      if (img) await sheetRow(sc, i * (H + 8), W, H, img, oldUrl, newUrl, entry.file);
+      report.cases.push(entry);
+      say();
+    }
+    await post("/save?name=vlm_extract.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

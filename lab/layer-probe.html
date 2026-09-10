@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Layer probe</title>
+<style>body{margin:0;font:12px system-ui;background:#111;color:#eee}iframe{width:1100px;height:700px;border:0}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app" src="../index.html"></iframe>
+<script>
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const post = (u, b) => fetch(u, { method: "POST", body: b }).catch(e => console.warn(e));
+(async function () {
+  const report = { layers: [] };
+  try {
+    const f = document.getElementById("app");
+    await new Promise(res => { f.onload = res; });
+    const win = f.contentWindow, doc = f.contentDocument;
+    win.onerror = (m, s, l) => report.layers.push({ pageError: m + " @" + l });
+    await wait(1500);
+    doc.querySelector('.nav-btn[data-target="assistant"]').click();
+    doc.getElementById("stylist-prompt").value = "everyday casual";
+    doc.getElementById("btn-generate-outfit").click();
+    await wait(24000);
+
+    // top-level function declarations are reachable on the iframe's window
+    const layers = win.currentOutfitLayers();
+    report.layerCount = layers.length;
+    for (const l of layers) {
+      const entry = { cat: l.cat, name: l.item.name, src: (l.item.image || "").slice(0, 48) };
+      try {
+        const quick = win.quickCutout(l.item);
+        entry.quick = quick ? quick.slice(0, 22) + " len=" + quick.length : null;
+      } catch (e) { entry.quickError = String(e && e.message || e); }
+      try {
+        const cut = await win.getItemCutout(l.item);
+        entry.cutout = cut ? cut.slice(0, 22) + " len=" + cut.length : null;
+      } catch (e) { entry.cutoutError = String(e && e.message || e); }
+      report.layers.push(entry);
+    }
+    report.renderSrc = doc.getElementById("mannequin-render").src.slice(0, 30);
+    report.renderLen = doc.getElementById("mannequin-render").src.length;
+    document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

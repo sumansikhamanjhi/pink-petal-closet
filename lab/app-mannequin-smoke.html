@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>App mannequin smoke</title>
+<style>body{background:#111;color:#eee;font:13px ui-monospace,monospace;margin:0;padding:12px}
+iframe{width:1280px;height:900px;border:0;background:#fff;opacity:0.25}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app" src="../index.html"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { steps: [] };
+const say = t => {
+  report.steps.push(t);
+  document.getElementById("log").textContent = report.steps.join("\n");
+};
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Drives the REAL app, not a copy of it: builds three outfits through the
+ * app's own state and renders each with the app's own composite path. This is
+ * what catches wiring mistakes that every module test passes — a script tag in
+ * the wrong order, a renamed field, a module that never loaded.
+ */
+const OUTFITS = [
+  { name: "top+skirt+shoes", slots: { tops: 1, bottoms: 1, footwear: 1 } },
+  { name: "dress+shoes",     slots: { dresses: 1, footwear: 1 } },
+  { name: "swap the shoes",  slots: { tops: 1, bottoms: 1, footwear: 2 } }
+];
+
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    // app.js declares its state with let/const, which in a classic script does
+    // NOT put it on window — so reach it through the frame's own scope
+    const read = expr => win.eval(expr);
+
+    for (let i = 0; i < 80; i++) {
+      const ready = read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 &&" +
+                         " typeof renderOutfitDisplay === 'function'");
+      if (ready) break;
+      await wait(250);
+    }
+    const wardrobe = read("wardrobe");
+    const activeOutfit = read("activeOutfit");
+    const renderComposite = read("renderOutfitDisplay");
+    if (!wardrobe || !renderComposite) throw new Error("app never finished loading");
+    say("wardrobe items: " + wardrobe.length);
+    say("modules present: " + ["Watershed", "GarmentCutout", "BodyModel", "GarmentFit", "OutfitCompose"]
+      .map(m => m + "=" + (win[m] ? "yes" : "NO")).join(" "));
+
+    const byCat = {};
+    for (const item of wardrobe) {
+      if (!item.image) continue;
+      (byCat[item.category] = byCat[item.category] || []).push(item);
+    }
+    say("categories with photos: " + Object.keys(byCat).map(c => c + ":" + byCat[c].length).join(" "));
+
+    const shots = [];
+    for (const outfit of OUTFITS) {
+      for (const cat of Object.keys(activeOutfit.slots)) {
+        activeOutfit.slots[cat].itemId = null;
+        activeOutfit.slots[cat].enabled = false;
+      }
+      const picked = [];
+      let ok = true;
+      for (const cat of Object.keys(outfit.slots)) {
+        const list = byCat[cat] || [];
+        const item = list[Math.min(list.length - 1, outfit.slots[cat] - 1)];
+        if (!item) { ok = false; break; }
+        activeOutfit.slots[cat].itemId = item.id;
+        activeOutfit.slots[cat].enabled = true;
+        picked.push(cat + "=" + item.name);
+      }
+      if (!ok) { say(outfit.name + ": SKIPPED, wardrobe has no photo for a slot"); continue; }
+
+      const t0 = performance.now();
+      const done = await renderComposite();
+      const ms = Math.round(performance.now() - t0);
+      const src = win.document.getElementById("mannequin-render").src;
+      const caption = (win.document.getElementById("mannequin-caption") || {}).textContent || "";
+      say(outfit.name + ": " + (done ? "rendered" : "FAILED") + " in " + ms + "ms  [" +
+          picked.join(", ") + "]");
+      say("   caption: " + caption);
+      shots.push({ name: outfit.name, src: done ? src : null });
+    }
+
+    // one sheet so the render can be looked at, not just counted
+    const loaded = [];
+    for (const s of shots) {
+      if (!s.src || s.src.indexOf("data:") !== 0) { loaded.push(null); continue; }
+      const im = new Image();
+      await new Promise(r => { im.onload = r; im.onerror = r; im.src = s.src; });
+      loaded.push(im.width ? im : null);
+    }
+    const PW = 300, PH = 460;
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * shots.length;
+    sheet.height = PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+    for (let i = 0; i < shots.length; i++) {
+      sc.fillStyle = "#8ad";
+      sc.font = "12px monospace";
+      sc.fillText(shots[i].name, i * PW + 6, 14);
+      const im = loaded[i];
+      if (!im) { sc.fillStyle = "#f36"; sc.fillText("no render", i * PW + 6, 34); continue; }
+      const s = Math.min(PW / im.width, (PH - 22) / im.height);
+      sc.drawImage(im, i * PW + (PW - im.width * s) / 2, 20, im.width * s, im.height * s);
+    }
+    await post("/save?name=app_mannequin.png", sheet.toDataURL("image/png"));
+    report.ok = shots.every(s => s.src);
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

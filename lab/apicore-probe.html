@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cloud Run server: core decisions</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../server/api-core.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * The deployed server, checked as far as a browser can check it.
+ *
+ * WHY THIS EXISTS. This machine has no Node, no npm and no Docker, so
+ * server/server.js cannot be run here at all. Rather than ship the whole port
+ * unverified, everything that could actually be got wrong in it lives in
+ * server/api-core.js as pure functions — and pure functions run fine in a
+ * browser. So the URLs, the request bodies, the response parsing, the retry
+ * rules and the static-path allow-list are all tested for real below.
+ *
+ * What is NOT tested: sockets, file reads, and the calls to Google. Those wait
+ * for the deploy. Said plainly rather than implied, because "24 checks passed"
+ * must not be mistaken for "the server runs".
+ *
+ * The reference for every expectation is server.ps1, which has been serving
+ * this app locally all along.
+ */
+(async function () {
+  try {
+    const C = window.PPApiCore;
+    check("api-core loaded", !!C);
+
+    /* ---- 1. server.js at least parses -------------------------------- */
+    /* the nearest thing to `node --check` available here: the browser's own
+       parser, on the real file, without running a line of it */
+    const src = await fetch("../server/server.js").then(r => r.text());
+    let parsed = true, parseErr = "";
+    try { new Function(src); } catch (e) { parsed = false; parseErr = String(e.message); }
+    check("server/server.js parses as valid JavaScript", parsed, parseErr || (src.length + " bytes"));
+    check("server.js reads the port Cloud Run gives it", /process\.env\.PORT/.test(src));
+    check("server.js listens on 0.0.0.0, not localhost",
+          /listen\(\s*PORT\s*,\s*"0\.0\.0\.0"/.test(src));
+
+    /* the key must not be able to reach the browser: it may appear only in the
+       upstream URL builder and the env read, never in a response body */
+    const leaks = src.split("\n").filter(l =>
+      /sendJson/.test(l) && /apiKey|GEMINI_API_KEY/.test(l) && !/no GEMINI_API_KEY/.test(l));
+    check("no response body mentions the key", leaks.length === 0, leaks.join(" | "));
+
+    /* ---- 2. reading the environment ---------------------------------- */
+    const bare = C.readEnv({});
+    check("with no env at all, nothing is ready", bare.ready !== true && !bare.apiKey && !bare.useVertex);
+    check("the status of an empty server says so",
+          C.statusPayload(bare, null).ready === false &&
+          C.statusPayload(bare, null).via === "none");
+
+    const keyed = C.readEnv({ GEMINI_API_KEY: "AIza-test" });
+    check("GEMINI_API_KEY is picked up", keyed.apiKey === "AIza-test");
+    check("GOOGLE_API_KEY works as the fallback name",
+          C.readEnv({ GOOGLE_API_KEY: "alt" }).apiKey === "alt");
+    const ks = C.statusPayload(keyed, null);
+    check("a key alone makes try-on ready via the key",
+          ks.ready === true && ks.via === "apikey" && ks.vlm === true, ks.via);
+
+    /* the client gates identification-on-upload on `vlm`, and that is the key */
+    check("no key means no identification on upload",
+          C.statusPayload(C.readEnv({ PP_VERTEX_PROJECT: "p", K_SERVICE: "s" }), null).vlm === false);
+
+    /* the whole point of the Cloud Run path: a project id and no key at all */
+    const onRun = C.readEnv({ PP_VERTEX_PROJECT: "my-proj", K_SERVICE: "pink-petal-closet" });
+    check("on Cloud Run a project id alone is enough for Vertex", onRun.useVertex === true);
+    check("off Cloud Run a project id alone is NOT enough",
+          C.readEnv({ PP_VERTEX_PROJECT: "my-proj" }).useVertex === false);
+    check("off Cloud Run a pasted token restores it",
+          C.readEnv({ PP_VERTEX_PROJECT: "my-proj", PP_VERTEX_TOKEN: "ya29." }).useVertex === true);
+    const vs = C.statusPayload(onRun, null);
+    check("Vertex is preferred over the key when both are set",
+          C.statusPayload(C.readEnv({ GEMINI_API_KEY: "k", PP_VERTEX_PROJECT: "p", K_SERVICE: "s" }), null).via === "vertex");
+    check("Vertex reports Cloud-credit billing", vs.billing === "cloud credits", vs.billing);
+
+    check("PP_TRYON_MOCK=0 reads as off, not on", C.readEnv({ PP_TRYON_MOCK: "0" }).mock === false);
+    check("PP_TRYON_MOCK=1 reads as on", C.readEnv({ PP_TRYON_MOCK: "1" }).mock === true);
+
+    /* ---- 3. the upstream addresses ----------------------------------- */
+    const uri = C.generativeUri("gemini-3.5-flash", "AIza+/=");
+    check("the generative endpoint is v1beta generateContent",
+          uri.indexOf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=") === 0);
+    check("a key with URL-special characters is escaped",
+          uri.indexOf("AIza%2B%2F%3D") > 0, uri.slice(uri.indexOf("?")));
+
+    const vcfg = C.readEnv({ PP_VERTEX_PROJECT: "proj-1", K_SERVICE: "s" });
+    check("the Vertex host is regional",
+          C.vertexUri(vcfg) === "https://us-central1-aiplatform.googleapis.com/v1/projects/proj-1" +
+            "/locations/us-central1/publishers/google/models/gemini-2.5-flash-image:generateContent",
+          C.vertexUri(vcfg));
+    /* the one region that has no prefix — getting this wrong is a 404 */
+    const gcfg = C.readEnv({ PP_VERTEX_PROJECT: "proj-1", PP_VERTEX_REGION: "global", K_SERVICE: "s" });
+    check("region 'global' drops the host prefix",
+          C.vertexUri(gcfg).indexOf("https://aiplatform.googleapis.com/v1/") === 0, C.vertexUri(gcfg));
+
+    /* ---- 4. the request bodies --------------------------------------- */
+    const payload = { prompt: "wear this", images: [
+      { mime: "image/png", data: "AAA" }, { mime: "image/webp", data: "BBB" } ] };
+
+    const vlmB = C.vlmBody(payload);
+    check("the VLM body leads with the prompt, then every image",
+          vlmB.contents[0].parts.length === 3 &&
+          vlmB.contents[0].parts[0].text === "wear this" &&
+          vlmB.contents[0].parts[1].inline_data.mime_type === "image/png" &&
+          vlmB.contents[0].parts[2].inline_data.data === "BBB");
+    check("the VLM asks for JSON at temperature 0",
+          vlmB.generationConfig.temperature === 0 &&
+          vlmB.generationConfig.responseMimeType === "application/json");
+
+    const t1 = C.tryOnBody(payload, 1), t2 = C.tryOnBody(payload, 2);
+    check("the first try-on attempt asks for an IMAGE modality",
+          t1.generationConfig.responseModalities[0] === "IMAGE");
+    check("the second attempt drops it, for models that reject it",
+          t2.generationConfig === undefined);
+
+    const vB = C.vertexBody(payload, vcfg);
+    check("the Vertex body carries role:user, which Vertex requires",
+          vB.contents[0].role === "user");
+    check("the Vertex body pins the 9:16 aspect ratio",
+          vB.generationConfig.imageConfig.aspectRatio === "9:16");
+    check("an empty PP_VERTEX_ASPECT means no imageConfig at all",
+          C.vertexBody(payload, C.readEnv({ PP_VERTEX_PROJECT: "p", PP_VERTEX_ASPECT: "", K_SERVICE: "s" }))
+            .generationConfig.imageConfig === undefined);
+
+    /* ---- 5. reading the answer --------------------------------------- */
+    /* the REST API has been seen answering in both spellings, and betting on
+       one of them is a render that silently comes back empty */
+    const camel = { candidates: [{ content: { parts: [
+      { text: "here you go" }, { inlineData: { mimeType: "image/webp", data: "ZZZ" } } ] } }] };
+    const snake = { candidates: [{ content: { parts: [
+      { inline_data: { mime_type: "image/png", data: "YYY" } } ] } }] };
+    check("an image in inlineData/mimeType is found",
+          C.extractImage(camel).image === "data:image/webp;base64,ZZZ", C.extractImage(camel).image);
+    check("an image in inline_data/mime_type is found too",
+          C.extractImage(snake).image === "data:image/png;base64,YYY", C.extractImage(snake).image);
+    check("an image with no declared mime defaults to png",
+          C.extractImage({ candidates: [{ content: { parts: [{ inlineData: { data: "Q" } }] } }] })
+            .image === "data:image/png;base64,Q");
+
+    /* a refusal in prose is the common failure, and the prose is the only
+       useful thing to show the wearer */
+    const refusal = { candidates: [{ content: { parts: [{ text: "I can't do that" }] } }] };
+    const ri = C.extractImage(refusal);
+    check("prose instead of an image is a failure carrying the prose",
+          ri.ok === false && ri.detail === "I can't do that", ri.error + " / " + ri.detail);
+    check("a shape we did not expect fails without throwing",
+          C.extractImage({}).ok === false && C.extractImage(null).ok === false);
+
+    const multi = { candidates: [{ content: { parts: [{ text: "a" }, { text: "b" }] } }] };
+    check("VLM text is concatenated across parts",
+          C.extractText(multi).text === "ab", C.extractText(multi).text);
+    check("no text is a failure, not an empty success",
+          C.extractText({ candidates: [{ content: { parts: [] } }] }).ok === false);
+
+    /* ---- 6. what is worth another go --------------------------------- */
+    const perDay = '{"error":{"details":[{"quotaId":"GenerateRequestsPerDayPerProject"}]}}';
+    check("a spent DAILY quota moves to the next model",
+          C.vlmRetry(perDay, 0).action === "next-model");
+    const perMin = '{"error":{"status":"RESOURCE_EXHAUSTED"},"retryDelay":"27s"}';
+    const w = C.vlmRetry(perMin, 0);
+    check("a per-minute limit waits the delay it was given, plus a margin",
+          w.action === "wait" && w.seconds === 29, JSON.stringify(w));
+    check("a rate limit with no stated delay waits 12s",
+          C.vlmRetry('{"error":{"status":"RESOURCE_EXHAUSTED"}}', 0).seconds === 12);
+    check("it only waits twice, then moves on",
+          C.vlmRetry(perMin, 2).action === "next-model");
+    check("an unrecognised error moves to the next model",
+          C.vlmRetry("404 not found", 0).action === "next-model");
+    check("a spent daily quota is explained in words a person can act on",
+          /quota is spent/.test(C.friendlyVlmError(perDay)) &&
+          C.friendlyVlmError("some 500") === "vlm request failed");
+
+    const order = C.vlmModelOrder({}, C.readEnv({}), "gemini-3.5-flash");
+    check("the model that last worked is tried first",
+          order[0] === "gemini-3.5-flash" && order.length === C.DEFAULTS.vlmModels.length,
+          order.slice(0, 3).join(","));
+    check("no model appears twice in the order", new Set(order).size === order.length);
+    check("a model named in the request is used alone",
+          C.vlmModelOrder({ model: "only-this" }, C.readEnv({}), "x").join(",") === "only-this");
+
+    /* a dropped upload is worth retrying; a real 400 from Google is not */
+    check("a send that died with no response body is retried",
+          C.vertexRetry(1, false, "socket hang up", true).action === "retry");
+    check("an expired token is retried WITH a fresh mint",
+          C.vertexRetry(1, true, "UNAUTHENTICATED", true).remint === true);
+    check("a token error is not retried when there is nothing to re-mint from",
+          C.vertexRetry(1, true, "UNAUTHENTICATED", false).action === "fail");
+    check("a genuine rejection fails immediately",
+          C.vertexRetry(1, true, '{"error":{"code":400}}', true).action === "fail");
+    check("it gives up after three attempts",
+          C.vertexRetry(3, false, "socket hang up", true).action === "fail");
+
+    /* ---- 7. what a stranger may fetch -------------------------------- */
+    check("/ serves the app", C.safePath("/") === "index.html");
+    check("a normal asset is served",
+          C.safePath("/assets/mannequin_base.jpg") === "assets/mannequin_base.jpg");
+    check("a module is served", C.safePath("/modules/worn-render.js") === "modules/worn-render.js");
+    /* %00 decodes to a NUL, the classic trick for smuggling one extension past
+       a check and a different one to the filesystem */
+    for (const bad of ["/index.html%00.png", "/assets/a%00.jpg",
+                       "/../server.ps1", "/assets/../../etc/passwd", "/%2e%2e/%2e%2e/etc/passwd",
+                       "/.env", "/server/api-core.js", "/server/server.js", "/lab/apicore-probe.html",
+                       "/deploy.ps1", "/server.ps1", "/package.json", "/Dockerfile",
+                       "/form_answers.md", "/.gcloudignore"]) {
+      check("refused: " + bad, C.safePath(bad) === null, JSON.stringify(C.safePath(bad)));
+    }
+    check("content types are declared for what the app actually ships",
+          C.contentTypeFor("a.html").indexOf("text/html") === 0 &&
+          C.contentTypeFor("a.js").indexOf("application/javascript") === 0 &&
+          C.contentTypeFor("a.webp") === "image/webp" &&
+          C.contentTypeFor("a.jpg") === "image/jpeg");
+    check("text types declare UTF-8, so dashes and emoji survive",
+          /charset=utf-8/.test(C.contentTypeFor("a.html")) &&
+          /charset=utf-8/.test(C.contentTypeFor("a.js")) &&
+          /charset=utf-8/.test(C.contentTypeFor("a.css")));
+
+    /* ---- 8. the contract the front end depends on -------------------- */
+    /* read from the client, not restated here: if tryon-service.js starts
+       reading a different field, this must fail rather than keep passing */
+    const clientSrc = await fetch("../tryon-service.js").then(r => r.text());
+    const vlmSrc = await fetch("../vlm-service.js").then(r => r.text());
+    check("the client still gates the render on `ready`", /st\.ready/.test(clientSrc));
+    check("the client still reads the image from `image`", /payload\.image/.test(clientSrc));
+    check("the client still gates identification on `vlm`", /st\.vlm/.test(vlmSrc));
+    check("the client still reads text from `text`", /payload\.text/.test(vlmSrc));
+    const st = C.statusPayload(C.readEnv({ GEMINI_API_KEY: "k" }), null);
+    for (const field of ["ready", "mock", "model", "via", "billing", "vlm", "vlmModel"]) {
+      check("status answers with `" + field + "`, as server.ps1 did", field in st);
+    }
+    check("the endpoint paths the client asks for are the ones served",
+          /"\/api\/tryon"/.test(clientSrc) && /"\/api\/tryon\/status"/.test(clientSrc) &&
+          /"\/api\/vlm"/.test(vlmSrc) &&
+          /urlPath === "\/api\/tryon"/.test(src) &&
+          /urlPath === "\/api\/tryon\/status"/.test(src) &&
+          /urlPath === "\/api\/vlm"/.test(src));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  say("\n" + report.passed + " passed, " + report.failed + " failed");
+  await post("/save?name=report.json",
+    btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+  await post("/done", "apicore");
+})();
+</script>
+</body></html>

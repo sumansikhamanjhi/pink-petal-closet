@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Occlusion bite baseline</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}
+.row{display:flex;gap:8px;align-items:flex-start;margin:8px 0;flex-wrap:wrap}
+canvas{background:#222;image-rendering:pixelated}</style></head>
+<body>
+<pre id="log">running…</pre>
+<div id="shelf"></div>
+<script src="../garment-engine.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const report = { cases: [] };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+
+/**
+ * How much garment is MISSING because hair or a limb was in front of it.
+ *
+ * Measured, not eyeballed. A bite is a pixel that
+ *   - the parser called hair or skin (so something was in front),
+ *   - sits inside the garment's own closed silhouette (so fabric belongs
+ *     there — it is an indentation, not the outside world), and
+ *   - did not survive into the final mask.
+ *
+ * The same measure is what the fix has to drive to ~0, so the number here is
+ * the before-shot of the same ruler.
+ */
+const CASES = [
+  "testset/casual_tshirt_jeans.jpg",
+  "testset/dress_dark_runway.jpg",
+  "testset/dress_long_1997.jpg",
+  "testset/dress_red_runway.jpg",
+  "testset/dress_white_outdoor.jpg",
+  "testset/mannequin_dress.jpg",
+  "testset/mannequin_top_skirt.jpg"
+];
+
+/* --- morphology, standalone so the measurement does not depend on the code
+       under test --- */
+function boxSum(mask, w, h, r) {
+  const iw = w + 1, ii = new Int32Array(iw * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let row = 0; const o = y * w, oi = (y + 1) * iw, pi = y * iw;
+    for (let x = 0; x < w; x++) { row += mask[o + x]; ii[oi + x + 1] = ii[pi + x + 1] + row; }
+  }
+  const out = new Int32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+    const a = (y1 + 1) * iw, b = y0 * iw;
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+      out[y * w + x] = ii[a + x1 + 1] - ii[b + x1 + 1] - ii[a + x0] + ii[b + x0];
+    }
+  }
+  return out;
+}
+function dilate(m, w, h, r) { const c = boxSum(m, w, h, r), o = new Uint8Array(w * h);
+  for (let i = 0; i < o.length; i++) o[i] = c[i] > 0 ? 1 : 0; return o; }
+function erode(m, w, h, r) {
+  const c = boxSum(m, w, h, r), o = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) { const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+    for (let x = 0; x < w; x++) { const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+      o[y * w + x] = c[y * w + x] >= (y1 - y0 + 1) * (x1 - x0 + 1) ? 1 : 0; } }
+  return o;
+}
+const closeOp = (m, w, h, r) => erode(dilate(m, w, h, r), w, h, r);
+
+function biteOf(dbg) {
+  const { w, h, sem, alpha } = dbg;
+  const mask = new Uint8Array(w * h);
+  let area = 0, minx = w, maxx = 0;
+  for (let p = 0; p < w * h; p++) if (alpha[p] > 0.5) { mask[p] = 1; area++; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (mask[y * w + x]) { if (x < minx) minx = x; if (x > maxx) maxx = x; }
+  }
+  const gw = Math.max(1, maxx - minx + 1);
+  const r = Math.max(4, Math.min(40, Math.round(gw * 0.09)));
+  const closed = closeOp(mask, w, h, r);
+  let bite = 0;
+  const map = new Uint8Array(w * h);
+  for (let p = 0; p < w * h; p++) {
+    if (mask[p] || !closed[p]) continue;
+    if (sem.hair[p] > 0.5 || sem.skin[p] > 0.5 || sem.face[p] > 0.5) { map[p] = 1; bite++; }
+  }
+  return { area, bite, share: +(bite / Math.max(1, area)).toFixed(4), r, gw, map, w, h };
+}
+
+function show(name, dbg, m) {
+  const shelf = document.getElementById("shelf");
+  const row = document.createElement("div");
+  row.className = "row";
+  const lbl = document.createElement("div");
+  lbl.textContent = name + "  bite " + (m.share * 100).toFixed(2) + "%";
+  row.appendChild(lbl);
+  const cv = document.createElement("canvas");
+  cv.width = m.w; cv.height = m.h;
+  const ctx = cv.getContext("2d");
+  const img = ctx.createImageData(m.w, m.h);
+  for (let p = 0; p < m.w * m.h; p++) {
+    const o = p * 4;
+    const a = dbg.alpha[p] > 0.5;
+    img.data[o] = m.map[p] ? 255 : (a ? 90 : 20);
+    img.data[o + 1] = m.map[p] ? 40 : (a ? 90 : 20);
+    img.data[o + 2] = m.map[p] ? 40 : (a ? 90 : 20);
+    img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  row.appendChild(cv);
+  shelf.appendChild(row);
+  return cv;
+}
+
+(async function () {
+  try {
+    await window.GarmentEngine.warmup();
+    report.backend = window.GarmentEngine.status ? window.GarmentEngine.status() : null;
+    for (const src of CASES) {
+      const mode = /jeans|skirt/.test(src) ? "top" : "dress";
+      let res;
+      try {
+        res = await window.GarmentEngine.extract(src,
+          { mode, background: "transparent", padding: 0, outputMaxDim: 720, debug: true });
+      } catch (e) {
+        report.cases.push({ src, error: String(e && e.message || e) });
+        say("ERR " + src + " " + e); flush(); continue;
+      }
+      const dbg = res._debug;
+      let patchCount = 0;
+      for (let p = 0; p < dbg.w * dbg.h; p++) if (dbg.patch[p]) patchCount++;
+      const m = biteOf(dbg);
+      const entry = { src, quality: res.metrics.quality, patched: res.metrics.patched,
+                      occluded: res.metrics.occluded, bites: dbg.bites,
+                      patchPixels: patchCount, area: m.area, bite: m.bite,
+                      biteShare: m.share, closeRadius: m.r, garmentWidth: m.gw,
+                      warnings: res.warnings };
+      report.cases.push(entry);
+      say(src + "  q" + res.metrics.quality + "  bite " + (m.share * 100).toFixed(2) +
+          "%  patched " + (res.metrics.patched * 100).toFixed(2) + "%");
+      const cv = show(src, dbg, m);
+      await post("/save?name=bite_" + src.replace(/[^a-z0-9]+/gi, "_") + ".png",
+                 cv.toDataURL("image/png"));
+      await post("/save?name=cut_" + src.replace(/[^a-z0-9]+/gi, "_") + ".png", res.image);
+      flush();
+    }
+    report.worst = report.cases.filter(c => c.biteShare !== undefined)
+      .sort((a, b) => b.biteShare - a.biteShare).slice(0, 3)
+      .map(c => c.src + " " + (c.biteShare * 100).toFixed(2) + "%");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

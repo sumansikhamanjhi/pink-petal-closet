@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>module: outfit-compose</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../modules/body-model.js"></script>
+<script src="../modules/garment-straighten.js"></script>
+<script src="../modules/garment-fit.js"></script>
+<script src="../modules/outfit-compose.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Module 3: whole outfits, and the mixing cases that used to go wrong.
+ * The last two swap ONE piece of the outfit before it — if the fit really is
+ * solved per garment rather than per combination, everything else must land in
+ * exactly the same place.
+ */
+const WARDROBE = {
+  d1:  { cat: "dresses",  file: "../assets/floral_white_dress.jpg",    region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  d2:  { cat: "dresses",  file: "../assets/red_cocktail_dress.jpg",    region: { x: 0.180, y: 0.080, w: 0.640, h: 0.870 } },
+  t6:  { cat: "tops",     file: "../assets/white_ribbed_top.jpg",      region: { x: 0.192, y: 0.123, w: 0.615, h: 0.733 } },
+  t3:  { cat: "tops",     file: "../assets/white_linen_blouse.jpg",    region: { x: 0.140, y: 0.110, w: 0.720, h: 0.790 } },
+  b1:  { cat: "bottoms",  file: "../assets/sage_pleated_skirt.jpg",    region: { x: 0.150, y: 0.090, w: 0.700, h: 0.860 } },
+  b3:  { cat: "bottoms",  file: "../assets/dark_skinny_jeans.jpg",     region: { x: 0.240, y: 0.070, w: 0.520, h: 0.880 } },
+  j1:  { cat: "jackets",  file: "../assets/navy_denim_jacket.jpg",     region: { x: 0.100, y: 0.120, w: 0.800, h: 0.760 } },
+  f1:  { cat: "footwear", file: "../assets/cream_retro_sneakers.jpg",  region: { x: 0.098, y: 0.251, w: 0.817, h: 0.541 } },
+  f2:  { cat: "footwear", file: "../assets/black_ankle_boots.jpg",     region: { x: 0.120, y: 0.140, w: 0.760, h: 0.740 } },
+  bg1: { cat: "bags",     file: "../assets/sage_leather_handbag.jpg",  region: { x: 0.150, y: 0.130, w: 0.700, h: 0.740 } }
+};
+
+const OUTFITS = [
+  { name: "top + skirt + shoes",   ids: ["t6", "b1", "f1"] },
+  { name: "blouse + jeans + boots", ids: ["t3", "b3", "f2"] },
+  { name: "dress + shoes + bag",   ids: ["d2", "f1", "bg1"] },
+  { name: "top + jeans + jacket",  ids: ["t6", "b3", "j1", "f2"] },
+  { name: "dress + skirt (clash)", ids: ["d1", "b1", "f1"] },
+  { name: "swap: shoes only",      ids: ["t6", "b1", "f2"] },
+  { name: "swap: bottom only",     ids: ["t6", "b3", "f1"] }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+(async function () {
+  const report = { outfits: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    const base = await load("../assets/mannequin_base.jpg");
+
+    // extract every piece once; module 3 is about mixing, not extraction
+    const cutouts = {};
+    for (const id of Object.keys(WARDROBE)) {
+      const w = WARDROBE[id];
+      const img = await load(w.file);
+      cutouts[id] = await GarmentCutout.extract(img, { region: w.region, category: w.cat });
+    }
+    report.extracted = Object.keys(cutouts).length;
+    say();
+
+    const PW = 250;
+    const PH = Math.round(PW * base.naturalHeight / base.naturalWidth) + 20;
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * OUTFITS.length;
+    sheet.height = PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < OUTFITS.length; i++) {
+      const o = OUTFITS[i];
+      const items = o.ids.map(id => ({ category: WARDROBE[id].cat, cutout: cutouts[id] }));
+      const result = await OutfitCompose.render(base, items, { frameWidth: 512 });
+
+      report.outfits.push({
+        name: o.name,
+        ids: o.ids,
+        layers: result.layers.map(l => l.category + "@" +
+          l.placement.top.toFixed(3) + "-" + l.placement.bottom.toFixed(3)),
+        dropped: result.dropped.map(d => d.category),
+        bridged: result.bridged,
+        bare: result.bare
+      });
+      say();
+
+      const s = Math.min(PW / result.width, (PH - 20) / result.height);
+      sc.drawImage(result.canvas, i * PW + (PW - result.width * s) / 2, 18,
+                   result.width * s, result.height * s);
+      sc.fillStyle = "#8ad";
+      sc.font = "11px monospace";
+      sc.fillText(o.name, i * PW + 4, 12);
+      if (result.bare.length) {
+        sc.fillStyle = "#ff5c8a";
+        sc.fillText("bare: " + result.bare.join(","), i * PW + 4, PH - 4);
+      }
+    }
+    await post("/save?name=module_outfit.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

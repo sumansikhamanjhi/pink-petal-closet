@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>zoom: cutout top</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/** The top third of each cutout, blown up, so hanger leftovers are unmistakable. */
+const CASES = [
+  { id: "d1", file: "../assets/floral_white_dress.jpg", region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 } },
+  { id: "b1", file: "../assets/sage_pleated_skirt.jpg", region: { x: 0.150, y: 0.090, w: 0.700, h: 0.860 }, cat: "bottoms" },
+  { id: "t6", file: "../assets/white_ribbed_top.jpg",   region: { x: 0.192, y: 0.123, w: 0.615, h: 0.733 }, zoom: false, cat: "tops" },
+  { id: "d1f", file: "../assets/floral_white_dress.jpg", region: { x: 0.240, y: 0.142, w: 0.522, h: 0.800 }, zoom: false },
+  // no box at all: what the app gets for a built-in wardrobe photo, where no
+  // vision call is made and the module falls back to its default region
+  { id: "d1-nobox", file: "../assets/floral_white_dress.jpg", region: null, zoom: false },
+  { id: "b1-nobox", file: "../assets/sage_pleated_skirt.jpg", region: null, zoom: false, cat: "bottoms" }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+(async function () {
+  const report = { cases: [] };
+  try {
+    const PW = 460, PH = 420;
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * 2;
+    sheet.height = PH * CASES.length;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let i = 0; i < CASES.length; i++) {
+      const cse = CASES[i];
+      const img = await load(cse.file);
+      const cut = await GarmentCutout.extract(img, Object.assign({ category: cse.cat || "dresses" }, cse.region ? { region: cse.region } : {}));
+      report.cases.push({ id: cse.id, size: cut.width + "x" + cut.height, cleanup: cut.cleanup });
+
+      const topH = Math.round(cut.height * (cse.zoom === false ? 1 : 0.30));
+      const s = Math.min(PW / cut.width, (PH - 20) / topH);
+      const y = i * PH + 16;
+
+      // over black and over magenta: a wooden hanger reads instantly on both
+      for (let k = 0; k < 2; k++) {
+        sc.fillStyle = k ? "#c020a0" : "#000";
+        sc.fillRect(k * PW, y, PW, PH - 20);
+        sc.drawImage(cut.canvas, 0, 0, cut.width, topH,
+                     k * PW + (PW - cut.width * s) / 2, y, cut.width * s, topH * s);
+        sc.fillStyle = "#8ad";
+        sc.font = "12px monospace";
+        sc.fillText(cse.id + (k ? " on magenta" : " on black") +
+                    "  hangerRows=" + cut.cleanup.hangerRows, k * PW + 6, i * PH + 12);
+      }
+    }
+    document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+    await post("/save?name=zoom_cutout.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

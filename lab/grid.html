@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>grid</title></head><body>
+<script>
+const post = (u, b) => fetch(u, { method: "POST", body: b });
+(async function () {
+  const img = new Image();
+  await new Promise(r => { img.onload = r; img.src = "../assets/mannequin_base.jpg"; });
+  const W = 768, H = Math.round(img.naturalHeight * (768 / img.naturalWidth));
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const c = cv.getContext("2d");
+  c.drawImage(img, 0, 0, W, H);
+  c.font = "11px monospace";
+  c.lineWidth = 1;
+  for (let i = 0; i <= 20; i++) {
+    const x = W * i / 20;
+    c.strokeStyle = (i % 5 === 0) ? "rgba(255,0,160,0.9)" : "rgba(255,0,160,0.35)";
+    c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke();
+    if (i % 2 === 0) { c.fillStyle = "#ff00a0"; c.fillText((i * 5) + "", x + 2, 12); }
+  }
+  for (let j = 0; j <= 20; j++) {
+    const y = H * j / 20;
+    c.strokeStyle = (j % 5 === 0) ? "rgba(0,190,255,0.9)" : "rgba(0,190,255,0.35)";
+    c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke();
+    c.fillStyle = "#00beff"; c.fillText((j * 5) + "", 3, y - 3);
+  }
+  await post("/save?name=grid_overlay.png", cv.toDataURL("image/png"));
+  await post("/report", JSON.stringify({ W: W, H: H }));
+})();
+</script>
+</body></html>

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Retouch on an on-body photo</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1320px;height:920px;border:0;background:#fff;opacity:0.25}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [], cases: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+function flush() {
+  post("/save?name=progress.json", btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+}
+const check = (name, pass, detail) => {
+  report.checks.push({ name, pass: !!pass, detail: detail === undefined ? "" : String(detail) });
+  say((pass ? "  ok  " : " FAIL ") + name + (detail === undefined ? "" : "  [" + detail + "]"));
+  flush();
+};
+
+/**
+ * The case the retouch brush was reported broken on: a garment photographed ON
+ * A PERSON, which takes the human-parsing engine rather than the backdrop-flood
+ * module. That engine returns its cutout cropped to its own bounding box and
+ * possibly magnified for output quality, so the paint frame has to be rebuilt
+ * from bbox rather than from the returned canvas's size.
+ *
+ * THE INVARIANT THAT CATCHES IT: the opaque region of the paint layer, measured
+ * as fractions of the frame, must land on the same rectangle the engine
+ * reported as bbox. If the canvas is pasted at its own size the garment comes
+ * out magnified and offset, and these two disagree — which is exactly what made
+ * the studio look zoomed in and cropped the rest away on save.
+ */
+const CASES = [
+  { file: "lab/testset/casual_tshirt_jeans.jpg", mode: "top" },
+  { file: "lab/testset/dress_red_runway.jpg",    mode: "dress" },
+  { file: "lab/testset/mannequin_top_skirt.jpg", mode: "bottom" }
+];
+
+function opaqueBox(alpha, w, h, t) {
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (alpha[y * w + x] < t) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  return x1 < 0 ? null : { x0, y0, x1, y1 };
+}
+
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const read = expr => win.eval(expr);
+
+    for (let i = 0; i < 100; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof workingLayerFromEngine === 'function'")) break;
+      await wait(250);
+    }
+    check("the app and the engine adapter loaded", read("typeof workingLayerFromEngine === 'function'"));
+
+    const PW = 300, PH = 380;
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * 3;
+    sheet.height = PH * CASES.length;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    for (let ci = 0; ci < CASES.length; ci++) {
+      const cse = CASES[ci];
+      const entry = { file: cse.file, mode: cse.mode };
+      const res = await read("GarmentEngine").extract("../" + cse.file, {
+        mode: cse.mode, background: "transparent", padding: 0, outputMaxDim: 720
+      });
+      const bb = res.bbox;
+      entry.bbox = bb.x + "," + bb.y + " " + bb.w + "x" + bb.h + " in " + bb.procW + "x" + bb.procH;
+      entry.maskCanvas = res.maskCanvas.width + "x" + res.maskCanvas.height;
+      entry.magnified = +(res.maskCanvas.width / bb.w).toFixed(2);
+
+      const layer = read("workingLayerFromEngine")("../" + cse.file, res);
+      if (!layer) { check(cse.file + ": a paint frame was built", false, "returned null"); continue; }
+      entry.frame = layer.w + "x" + layer.h;
+
+      const box = opaqueBox(layer.alpha, layer.w, layer.h, 0.5);
+      entry.opaqueBox = box ? (box.x0 + "," + box.y0 + " " + (box.x1 - box.x0 + 1) + "x" + (box.y1 - box.y0 + 1)) : "none";
+
+      // the invariant: the opaque region must sit on the reported bbox
+      const dx = Math.abs(box.x0 - bb.x), dy = Math.abs(box.y0 - bb.y);
+      const dw = Math.abs((box.x1 - box.x0 + 1) - bb.w), dh = Math.abs((box.y1 - box.y0 + 1) - bb.h);
+      const tol = Math.max(4, Math.round(bb.procW * 0.02));
+      check(cse.file.split("/").pop() + ": the garment sits where the engine said it does",
+            dx <= tol && dy <= tol && dw <= tol * 2 && dh <= tol * 2,
+            "off by dx=" + dx + " dy=" + dy + " dw=" + dw + " dh=" + dh + " (tol " + tol + ")");
+
+      // and nothing was clipped off the frame that the engine had inside it
+      const clipped = (bb.x + bb.w < bb.procW - 2 && box.x1 >= layer.w - 1) ||
+                      (bb.y + bb.h < bb.procH - 2 && box.y1 >= layer.h - 1);
+      check(cse.file.split("/").pop() + ": nothing was clipped by the frame edge", !clipped);
+
+      // the frame must be the whole photo, so the raw photo registers with it
+      const img = new Image();
+      await new Promise(r => { img.onload = r; img.onerror = r; img.src = "../" + cse.file; });
+      const photoAspect = img.naturalWidth / img.naturalHeight;
+      const frameAspect = layer.w / layer.h;
+      check(cse.file.split("/").pop() + ": the paint frame has the photo's own aspect",
+            Math.abs(photoAspect - frameAspect) < 0.02,
+            photoAspect.toFixed(3) + " vs " + frameAspect.toFixed(3));
+
+      // ---- pictures: photo, paint-layer alpha, and the two overlaid
+      const y = ci * PH + 16;
+      const label = (k, name) => {
+        sc.fillStyle = "#8ad"; sc.font = "11px monospace";
+        sc.fillText(name, k * PW + 4, ci * PH + 12);
+      };
+      const fit = (k, cv) => {
+        const s = Math.min(PW / cv.width, (PH - 22) / cv.height);
+        sc.drawImage(cv, k * PW + (PW - cv.width * s) / 2, y, cv.width * s, cv.height * s);
+      };
+      const photoCv = document.createElement("canvas");
+      photoCv.width = layer.w; photoCv.height = layer.h;
+      photoCv.getContext("2d").drawImage(img, 0, 0, layer.w, layer.h);
+      label(0, "photo at frame size"); fit(0, photoCv);
+
+      const cutCv = document.createElement("canvas");
+      cutCv.width = layer.w; cutCv.height = layer.h;
+      const cc = cutCv.getContext("2d");
+      const id = cc.createImageData(layer.w, layer.h);
+      id.data.set(layer.rgba);
+      cc.putImageData(id, 0, 0);
+      label(1, "paint layer"); fit(1, cutCv);
+
+      const both = document.createElement("canvas");
+      both.width = layer.w; both.height = layer.h;
+      const bc = both.getContext("2d");
+      bc.globalAlpha = 0.35;
+      bc.drawImage(photoCv, 0, 0);
+      bc.globalAlpha = 1;
+      bc.drawImage(cutCv, 0, 0);
+      bc.strokeStyle = "#00e676";
+      bc.lineWidth = 2;
+      bc.strokeRect(bb.x, bb.y, bb.w, bb.h);
+      label(2, "overlaid + engine bbox"); fit(2, both);
+
+      report.cases.push(entry);
+      flush();
+    }
+    await post("/save?name=onbody_paint.png", sheet.toDataURL("image/png"));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

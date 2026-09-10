@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Shuffle changes the picture?</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace}
+iframe{width:1100px;height:640px;border:0}pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app" src="../index.html"></iframe>
+<script>
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const post = (u, b) => fetch(u, { method: "POST", body: b }).catch(e => console.warn(e));
+const slots = doc => {
+  const o = {};
+  doc.querySelectorAll("#slot-controls-list .slot-control-item").forEach(row => {
+    const t = row.querySelector(".slot-name").textContent.replace(/\s+/g, " ").trim();
+    const m = /^([^:]+):\s*(.*?)(?:\s*\(Base Item.*)?$/.exec(t);
+    if (m) o[m[1].trim()] = m[2].trim();
+  });
+  return o;
+};
+const shot = doc => doc.getElementById("mannequin-render").src;
+
+(async function () {
+  const report = { rounds: [] };
+  try {
+    const f = document.getElementById("app");
+    await new Promise(res => { f.onload = res; });
+    const win = f.contentWindow, doc = f.contentDocument;
+    win.onerror = (m, s, l) => report.rounds.push({ pageError: m + " @" + l });
+    win.localStorage.setItem("pp_mannequin_mode", "composite");
+    await wait(1400);
+
+    doc.querySelector('.nav-btn[data-target="assistant"]').click();
+    doc.getElementById("stylist-prompt").value = "coffee date";
+    doc.getElementById("btn-generate-outfit").click();
+    await wait(14000);
+    // there is only one mannequin mode now, so the caption is what says which
+    // garments the picture is actually of
+    report.caption = doc.getElementById("mannequin-caption")?.textContent;
+
+    // pin the lavender crop top — the item that used to freeze the picture
+    // when the mannequin could only show one of nine stock photographs
+    doc.getElementById("btn-trigger-manual-select").click();
+    await wait(500);
+    const cards = Array.from(doc.querySelectorAll("#modal-items-grid > *"));
+    const card = cards.find(c => c.textContent.indexOf("Lavender Ribbed Crop Top") >= 0);
+    report.pinned = !!card;
+    if (card) card.click();
+    await wait(9000);
+
+    report.base = doc.getElementById("base-item-name").textContent;
+    report.caption = doc.getElementById("mannequin-caption").textContent;
+
+    // now shuffle three times, recording the picture and the items each time
+    for (let i = 0; i < 3; i++) {
+      const before = shot(doc);
+      doc.getElementById("btn-shuffle-around").click();
+      await wait(9000);
+      const after = shot(doc);
+      report.rounds.push({
+        pictureChanged: before !== after,
+        pictureBytes: after.length,
+        slots: slots(doc)
+      });
+      await post("/save?name=shuffle_" + (i + 1) + ".png", after);
+    }
+
+    const tops = new Set(report.rounds.map(r => r.slots.Top));
+    const bottoms = new Set(report.rounds.map(r => r.slots.Bottom));
+    report.summary = {
+      pinnedTopStayed: tops.size === 1 && tops.has("Lavender Ribbed Crop Top"),
+      bottomsSeen: Array.from(bottoms),
+      pictureChangedEveryTime: report.rounds.every(r => r.pictureChanged)
+    };
+    document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

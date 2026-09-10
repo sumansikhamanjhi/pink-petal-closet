@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Build cutout fixtures</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">building…</pre>
+<script src="../garment-engine.js"></script>
+<script src="../vlm-service.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Extracts a representative garment from each category once and saves the
+ * cutout to disk. Module harnesses load these instead of re-running extraction:
+ * fast, deterministic, and it spends no vision-model quota per test run.
+ */
+const ITEMS = [
+  { id: "t1", file: "../assets/pink_knit_top.jpg",        cat: "tops" },
+  { id: "t3", file: "../assets/white_linen_blouse.jpg",   cat: "tops" },
+  { id: "t6", file: "../assets/white_ribbed_top.jpg",     cat: "tops" },
+  { id: "b1", file: "../assets/sage_pleated_skirt.jpg",   cat: "bottoms" },
+  { id: "b3", file: "../assets/dark_skinny_jeans.jpg",    cat: "bottoms" },
+  { id: "b2", file: "../assets/beige_wide_trousers.jpg",  cat: "bottoms" },
+  { id: "d1", file: "../assets/floral_white_dress.jpg",   cat: "dresses" },
+  { id: "d2", file: "../assets/red_cocktail_dress.jpg",   cat: "dresses" },
+  { id: "j1", file: "../assets/navy_denim_jacket.jpg",    cat: "jackets" },
+  { id: "f1", file: "../assets/cream_retro_sneakers.jpg", cat: "footwear" },
+  { id: "f2", file: "../assets/black_ankle_boots.jpg",    cat: "footwear" },
+  { id: "bg1", file: "../assets/sage_leather_handbag.jpg", cat: "bags" }
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+(async function () {
+  const report = { items: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    await GarmentEngine.warmup();
+    for (const item of ITEMS) {
+      const entry = { id: item.id, file: item.file.split("/").pop(), cat: item.cat };
+      try {
+        const img = await load(item.file);
+        let region = null, label = null;
+        try {
+          const a = await VlmService.analyzeGarment(img);
+          region = a.region;
+          label = a.label;
+          entry.label = a.label;
+          entry.vlmCategory = a.category;
+        } catch (e) {
+          entry.vlmError = String(e && e.message || e);
+        }
+        const res = region
+          ? await GarmentEngine.extractObject(img, { region, category: item.cat, padding: 6 })
+          : await GarmentEngine.extract(img, { mode: "auto" });
+        entry.path = region ? "box-guided" : "engine-auto";
+        entry.quality = res.metrics.quality;
+        entry.size = res.bbox.w + "x" + res.bbox.h;
+        entry.kb = Math.round(res.imagePng.length / 1024);
+        await post("/save?name=fixture_" + item.id + "_" + item.cat + ".png", res.imagePng);
+      } catch (e) {
+        entry.error = String(e && e.message || e);
+      }
+      report.items.push(entry);
+      say();
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

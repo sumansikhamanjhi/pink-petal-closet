@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Body measure (edge-based)</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">measuring…</pre>
+<div id="out"></div>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/body-model.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * Measures the mannequin instead of arguing about it.
+ *
+ * The photo is a shop interior, not a studio sweep, so a backdrop flood is no
+ * use here. But the mannequin is a smooth bright form and its outline is the
+ * strongest gradient anywhere near it, so at each height the edge is found by
+ * walking outward from a seed centre and taking the biggest gradient peak on
+ * each side. Every detected edge is drawn back onto the photo, so a bad reading
+ * is visible rather than silently averaged into the answer.
+ */
+const HEIGHTS = [
+  ["neck", 0.220], ["shoulder", 0.250], ["chest", 0.280], ["bust", 0.310],
+  ["underbust", 0.350], ["waist", 0.405], ["upperHip", 0.440], ["hip", 0.462],
+  ["crotch", 0.500], ["thigh", 0.560], ["aboveKnee", 0.640], ["knee", 0.700],
+  ["calf", 0.760], ["ankle", 0.840]
+];
+
+const SEED = 0.50;          // starting guess for the centre
+const SEARCH = 0.22;        // how far either side to look, as a fraction of width
+
+(async function () {
+  const report = { rows: [] };
+  const img = new Image();
+  await new Promise(r => { img.onload = r; img.src = "../assets/mannequin_base.jpg"; });
+  const W = 900, H = Math.round(img.naturalHeight * (W / img.naturalWidth));
+
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, W, H);
+  const px = ctx.getImageData(0, 0, W, H).data;
+  const grad = Watershed.gradient(px, W, H, 2);
+
+  /** Strongest gradient in [from,to], searched outward from the seed. */
+  function edge(y, from, to) {
+    let best = -1, bestG = 0;
+    const step = from < to ? 1 : -1;
+    for (let x = from; step > 0 ? x <= to : x >= to; x += step) {
+      // average the gradient over a few rows so one noisy pixel cannot win
+      let g = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        const yy = Math.min(H - 1, Math.max(0, y + dy));
+        g += grad[yy * W + x];
+      }
+      if (g > bestG) { bestG = g; best = x; }
+    }
+    return { x: best, strength: Math.round(bestG / 5) };
+  }
+
+  ctx.lineWidth = 1;
+  let sumMid = 0, nMid = 0;
+  for (const [name, yFrac] of HEIGHTS) {
+    const y = Math.round(yFrac * H);
+    const seedX = Math.round(SEED * W);
+    const span = Math.round(SEARCH * W);
+    const left = edge(y, seedX - 12, Math.max(1, seedX - span));
+    const right = edge(y, seedX + 12, Math.min(W - 2, seedX + span));
+    if (left.x < 0 || right.x < 0) continue;
+
+    const mid = (left.x + right.x) / 2 / W;
+    const half = (right.x - left.x) / 2 / W;
+    const module = BodyModel.halfWidthAt(yFrac);
+    report.rows.push({
+      name,
+      y: yFrac,
+      measuredCentre: +mid.toFixed(4),
+      measuredHalf: +half.toFixed(4),
+      moduleHalf: +module.toFixed(4),
+      delta: +(half - module).toFixed(4),
+      edgeStrength: Math.min(left.strength, right.strength)
+    });
+    // legs are the honest centre cue; shoulders are affected by the pose
+    if (yFrac >= 0.40) { sumMid += mid; nMid++; }
+
+    ctx.strokeStyle = "#00ff88";
+    ctx.beginPath(); ctx.moveTo(left.x, y - 8); ctx.lineTo(left.x, y + 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(right.x, y - 8); ctx.lineTo(right.x, y + 8); ctx.stroke();
+    ctx.strokeStyle = "rgba(0,255,136,0.5)";
+    ctx.beginPath(); ctx.moveTo(left.x, y); ctx.lineTo(right.x, y); ctx.stroke();
+    ctx.fillStyle = "#00ff88";
+    ctx.font = "11px monospace";
+    ctx.fillText(name + " c=" + mid.toFixed(3) + " half=" + half.toFixed(3) +
+                 " (module " + module.toFixed(3) + ")", right.x + 6, y + 4);
+  }
+
+  report.centreFromLowerBody = +(sumMid / Math.max(1, nMid)).toFixed(4);
+  report.moduleCentre = BodyModel.BODY.centreX;
+
+  for (const [x, colour] of [[0.495, "#ffd400"], [0.505, "#00e5ff"], [0.518, "#ff2cc0"],
+                             [report.centreFromLowerBody, "#ffffff"]]) {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x * W, 0); ctx.lineTo(x * W, H); ctx.stroke();
+  }
+
+  document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  document.getElementById("out").appendChild(cv);
+  await post("/save?name=body_measure2.png", cv.toDataURL("image/png"));
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

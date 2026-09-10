@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Retouch: before and after</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:8px}
+pre{white-space:pre-wrap}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../modules/cutout-paint.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+/**
+ * The retouch brush against the defect the automatic pass is documented as
+ * leaving behind: the wooden arc where a hanger's arms slope away UNDER the
+ * garment's own shoulders, which the colour flood cannot reach because the
+ * fabric splits the wood into pieces.
+ *
+ * That limitation is exactly what a brush is for, so this is the case worth
+ * picturing: one sweep and it is gone, with no risk to the contrast panels
+ * that an automatic rule would have had to gamble on.
+ */
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src;
+});
+
+function rawAt(img, w, h) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d", { willReadFrequently: true });
+  c.drawImage(img, 0, 0, w, h);
+  return c.getImageData(0, 0, w, h).data;
+}
+
+function checker(ctx, x, y, w, h, size, a, b) {
+  for (let yy = 0; yy < h; yy += size) {
+    for (let xx = 0; xx < w; xx += size) {
+      ctx.fillStyle = ((xx / size | 0) + (yy / size | 0)) % 2 ? a : b;
+      ctx.fillRect(x + xx, y + yy, Math.min(size, w - xx), Math.min(size, h - yy));
+    }
+  }
+}
+
+(async function () {
+  const report = {};
+  try {
+    const img = await load("../assets/floral_white_dress.jpg");
+    const cut = await GarmentCutout.extract(img, { category: "dresses", keepWorking: true });
+    const W = cut.working.w, H = cut.working.h;
+    const raw = rawAt(img, W, H);
+
+    const layer = CutoutPaint.create({
+      w: W, h: H,
+      baseAlpha: cut.working.alpha,
+      baseRgba: cut.working.rgba,
+      rawRgba: raw
+    });
+    const before = CutoutPaint.render(layer);
+
+    /* Where IS the leftover wood? Measured rather than guessed, so the demo
+       shows the brush hitting the actual defect: in the top quarter of the
+       garment, the pixels whose hue is far from the garment's own are the
+       hanger. This is the same reading trimHangerBar makes; the difference is
+       that the brush does not need the wood to be reachable in one connected
+       piece, which is precisely why the automatic pass leaves these arcs. */
+    const wood = [];
+    {
+      let first = -1, last = -1;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) if (cut.working.alpha[y * W + x] > 0.5) { if (first < 0) first = y; last = y; break; }
+      }
+      const px = cut.working.rgba;
+      let r = 0, g = 0, b = 0, n = 0;
+      const midFrom = first + Math.round((last - first) * 0.35), midTo = first + Math.round((last - first) * 0.85);
+      for (let y = midFrom; y <= midTo; y++) {
+        for (let x = 0; x < W; x++) {
+          const p = y * W + x;
+          if (cut.working.alpha[p] < 0.5) continue;
+          r += px[p * 4]; g += px[p * 4 + 1]; b += px[p * 4 + 2]; n++;
+        }
+      }
+      r /= n; g /= n; b /= n;
+      const baseC = [r - g, g - b];
+      const zoneEnd = first + Math.round((last - first) * 0.09);
+      for (let y = first; y <= zoneEnd; y++) {
+        for (let x = 0; x < W; x++) {
+          const p = y * W + x;
+          if (cut.working.alpha[p] < 0.5) continue;
+          const dc = Math.hypot((px[p * 4] - px[p * 4 + 1]) - baseC[0],
+                                (px[p * 4 + 1] - px[p * 4 + 2]) - baseC[1]);
+          if (dc > 20) wood.push([x, y]);
+        }
+      }
+    }
+    report.woodPixels = wood.length;
+    if (wood.length) {
+      const xs = wood.map(w => w[0]), ys = wood.map(w => w[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs);
+      const y0 = Math.min(...ys), y1 = Math.max(...ys);
+      report.woodBox = [x0, y0, x1, y1].join(",");
+      // one sweep along the wood, thick enough to cover its slope
+      const r = Math.min(16, Math.max(6, Math.round((y1 - y0) / 2) + 3));
+      CutoutPaint.stroke(layer, "erase",
+        [[x0 / W, (y0 + y1) / 2 / H], [x1 / W, (y0 + y1) / 2 / H]], { radius: r });
+      report.brushRadius = r;
+    }
+    const after = CutoutPaint.render(layer);
+    report.strokes = after.strokes;
+    report.footprintPixels = after.footprintPixels;
+
+    // and the ghost view the user actually works against
+    const ghost = document.createElement("canvas");
+    ghost.width = W; ghost.height = H;
+    const gc = ghost.getContext("2d");
+    gc.globalAlpha = 0.28;
+    gc.drawImage(img, 0, 0, W, H);
+    gc.globalAlpha = 1;
+    gc.drawImage(after.canvas, 0, 0);
+
+    const PW = 420, PH = 250;
+    const panels = [
+      ["automatic pass", before.canvas, true],
+      ["after one erase sweep", after.canvas, true],
+      ["what the user sees (photo at 28%)", ghost, false]
+    ];
+    const sheet = document.createElement("canvas");
+    sheet.width = PW * panels.length;
+    sheet.height = PH;
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018";
+    sc.fillRect(0, 0, sheet.width, sheet.height);
+
+    panels.forEach(([name, cv, check], k) => {
+      if (check) checker(sc, k * PW, 18, PW, PH - 20, 10, "#2a2a34", "#3a3a46");
+      // crop tight around the shoulders, where the hanger is
+      const sx = Math.round(cv.width * 0.26), sw = Math.round(cv.width * 0.48);
+      const sy = Math.round(cv.height * 0.13), sh = Math.round(cv.height * 0.16);
+      const s = Math.min(PW / sw, (PH - 22) / sh);
+      sc.drawImage(cv, sx, sy, sw, sh,
+                   k * PW + (PW - sw * s) / 2, 18, sw * s, sh * s);
+      sc.fillStyle = "#8ad";
+      sc.font = "12px monospace";
+      sc.fillText(name, k * PW + 5, 13);
+    });
+
+    await post("/save?name=paint_shot.png", sheet.toDataURL("image/png"));
+    document.getElementById("log").textContent = JSON.stringify(report, null, 1);
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

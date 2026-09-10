@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Try-on bench self-check</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1400px;height:1000px;border:0;background:#fff;opacity:0.25}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="bench"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [], observed: {} };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (name, pass, detail) => {
+  report.checks.push({ name, pass: !!pass, detail: detail === undefined ? "" : String(detail) });
+  say((pass ? "  ok  " : " FAIL ") + name + (detail === undefined ? "" : "  [" + detail + "]"));
+  flush();
+};
+
+/**
+ * Checks the bench's VALIDATOR, which is the part that has to be trustworthy:
+ * if it says a generated try-on kept the mannequin, that has to mean something.
+ *
+ * So it is fed three results whose verdicts are known in advance — a garment
+ * genuinely composited onto the mannequin, the bare mannequin returned
+ * unchanged, and a completely different photograph — and asked to tell them
+ * apart. A validator that cannot is worse than none, because it would wave
+ * through a render that replaced the mannequin.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("bench");
+    const errors = [];
+    frame.src = "tryon-bench.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    win.addEventListener("error", e => errors.push(String(e.message)));
+    const read = expr => win.eval(expr);
+
+    for (let i = 0; i < 60; i++) {
+      if (read("typeof state !== 'undefined' && !!state.mann && !!state.garment")) break;
+      await wait(200);
+    }
+    check("the bench loaded its default mannequin and a garment",
+          read("!!state.mann && !!state.garment"));
+    check("it reports the proxy as unreachable rather than breaking",
+          /not reachable|no API key/i.test(read("document.getElementById('api-state').textContent")),
+          read("document.getElementById('api-state').textContent").slice(0, 70));
+
+    const prompt = read("document.getElementById('prompt').value");
+    report.observed.promptChars = prompt.length;
+    check("the prompt forbids reshaping the mannequin",
+          /Do not slim, reshape/.test(prompt) && /identical mannequin/.test(prompt) &&
+          /aspect ratio/.test(prompt), prompt.length + " chars");
+    check("the prompt names the garment from the file",
+          /cocktail dress|red cocktail/i.test(prompt));
+    await post("/save?name=bench_prompt.txt", btoa(unescape(encodeURIComponent(prompt))));
+
+    const mann = read("state.mann");
+    const garment = read("state.garment");
+    const MW = mann.naturalWidth, MH = mann.naturalHeight;
+
+    /** A believable "generated" result: the garment pasted over the torso. */
+    const compose = (opts) => {
+      const cv = win.document.createElement("canvas");
+      cv.width = MW; cv.height = MH;
+      const c = cv.getContext("2d");
+      c.drawImage(mann, 0, 0);
+      if (opts.garment) {
+        const gw = MW * (opts.wide || 0.30);
+        const gh = gw * garment.naturalHeight / garment.naturalWidth;
+        c.globalAlpha = 0.97;
+        c.drawImage(garment, (MW - gw) / 2, MH * (opts.top || 0.24), gw, gh);
+        c.globalAlpha = 1;
+      }
+      if (opts.reshape) {
+        // simulate a model that "improved" the mannequin: squeeze the body band
+        const band = c.getImageData(0, Math.round(MH * 0.22), MW, Math.round(MH * 0.5));
+        const tmp = win.document.createElement("canvas");
+        tmp.width = MW; tmp.height = band.height;
+        tmp.getContext("2d").putImageData(band, 0, 0);
+        c.drawImage(tmp, MW * 0.06, Math.round(MH * 0.22), MW * 0.88, band.height);
+      }
+      return cv.toDataURL("image/jpeg", 0.9);
+    };
+
+    const loadInto = async (dataUrl) => {
+      const img = new win.Image();
+      await new Promise(r => { img.onload = r; img.onerror = r; img.src = dataUrl; });
+      read("state").result = img;
+      read("evaluate")();
+      await wait(200);
+      return {
+        verdict: win.document.getElementById("verdict").textContent.trim(),
+        rows: [...win.document.querySelectorAll("#metrics tbody tr")]
+                .map(tr => [...tr.children].map(td => td.textContent.trim()).join(" | "))
+      };
+    };
+
+    // --- 1. a real try-on
+    const good = await loadInto(compose({ garment: true }));
+    report.observed.good = good;
+    check("a garment genuinely on the mannequin is called usable",
+          /usable/i.test(good.verdict) && !/not usable/i.test(good.verdict), good.verdict);
+    check("and it reports the garment as having arrived",
+          good.rows.some(r => /garment arrived/.test(r) && /✓/.test(r)),
+          (good.rows.find(r => /garment arrived/.test(r)) || "").slice(0, 60));
+
+    // --- 2. the generator returned the mannequin untouched (the mock case)
+    const empty = await loadInto(compose({ garment: false }));
+    report.observed.empty = empty;
+    check("an unchanged mannequin is called out as no garment",
+          /no garment arrived/i.test(empty.verdict), empty.verdict);
+
+    // --- 3. a completely different photograph
+    const otherImg = new win.Image();
+    await new Promise(r => { otherImg.onload = r; otherImg.onerror = r;
+                             otherImg.src = "../assets/mannequin_party.jpg"; });
+    const cvOther = win.document.createElement("canvas");
+    cvOther.width = MW; cvOther.height = MH;
+    cvOther.getContext("2d").drawImage(otherImg, 0, 0, MW, MH);
+    const wrong = await loadInto(cvOther.toDataURL("image/jpeg", 0.9));
+    report.observed.wrong = wrong;
+    check("a different photograph is called out as not being the mannequin",
+          /not your mannequin/i.test(wrong.verdict), wrong.verdict);
+
+    // --- 4. a model that dressed it but also reshaped the mannequin
+    const reshaped = await loadInto(compose({ garment: true, reshape: true }));
+    report.observed.reshaped = reshaped;
+    check("dressing it but reshaping the body is not waved through",
+          !/^usable — /.test(reshaped.verdict), reshaped.verdict);
+
+    check("no uncaught page errors", errors.length === 0, errors.join(" | ").slice(0, 200));
+
+    // a picture of the bench's own three panels, for the record
+    const shots = ["c-before", "c-after", "c-diff"].map(id => win.document.getElementById(id));
+    const PW = 300;
+    const sheet = document.createElement("canvas");
+    const ph = Math.round(PW * shots[0].height / shots[0].width);
+    sheet.width = PW * 3; sheet.height = ph;
+    const sc = sheet.getContext("2d");
+    shots.forEach((c, i) => { if (c && c.width) sc.drawImage(c, i * PW, 0, PW, ph); });
+    await post("/save?name=bench_panels.png", sheet.toDataURL("image/png"));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

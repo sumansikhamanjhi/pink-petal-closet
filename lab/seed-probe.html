@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>No emoji placeholder garments</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1340px;height:940px;border:0;background:#fff;opacity:0.22}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * The four emoji-only garments are gone, and gone from closets that already
+ * saved them.
+ *
+ * Removing them from DEFAULT_ITEMS is the easy half and only affects a NEW
+ * closet. Every browser that has opened this app before reads its wardrobe out
+ * of localStorage, so the interesting half is the prune on load — and the
+ * interesting risk is that it prunes too much. This probe writes a closet by
+ * hand, loads the real app against it, and checks what survived.
+ *
+ * This page and the app share an origin, so localStorage written here is the
+ * localStorage the app reads.
+ */
+const KEY = "pp_wardrobe_v3";
+const frame = () => document.getElementById("app");
+
+async function boot() {
+  const f = frame();
+  f.src = "about:blank";
+  await new Promise(r => { f.onload = r; });
+  f.src = "../index.html";
+  await new Promise(r => { f.onload = r; });
+  const win = f.contentWindow;
+  for (let i = 0; i < 100; i++) {
+    if (win.eval("typeof wardrobe !== 'undefined' && wardrobe.length > 0")) break;
+    await wait(250);
+  }
+  return win;
+}
+
+(async function () {
+  try {
+    /* ---- 1. a closet that has never been opened ---------------------- */
+    localStorage.removeItem(KEY);
+    let win = await boot();
+    let read = e => win.eval(e);
+    const doc = win.document;
+
+    const seed = read("DEFAULT_ITEMS");
+    check("the seed no longer carries any accessories",
+          seed.filter(i => /^accessories/.test(i.category)).length === 0,
+          seed.filter(i => /^accessories/.test(i.category)).map(i => i.name).join(",") || "none");
+    check("none of the four placeholder ids is in the seed",
+          seed.filter(i => ["a1", "a2", "a3", "a4"].indexOf(i.id) >= 0).length === 0);
+
+    /* the actual complaint: garments that were not photographs */
+    const noPhoto = seed.filter(i => !i.image);
+    check("every seeded garment is a photograph, not an emoji",
+          noPhoto.length === 0, noPhoto.map(i => i.name + "(" + (i.emoji || "?") + ")").join(",") || "all have photos");
+    check("the seed is 18 garments, down from 22", seed.length === 18, seed.length);
+    check("a fresh closet loads that seed", read("wardrobe").length === 18, read("wardrobe").length);
+
+    /* ---- 2. the empty category is honest, not broken ----------------- */
+    read("switchTab('closet')");
+    await wait(200);
+    const accBtn = [...doc.querySelectorAll("#web-filter-tabs .filter-btn")]
+      .find(b => b.dataset.category === "accessories");
+    check("the Accessories filter is still offered", !!accBtn);
+    if (accBtn) {
+      accBtn.click();
+      await wait(300);
+      const grid = doc.getElementById("closet-grid") || doc.querySelector(".closet-grid");
+      const txt = grid ? grid.textContent : "";
+      check("it shows an empty state rather than a broken grid",
+            /No items in this category/i.test(txt), JSON.stringify(txt.trim().slice(0, 70)));
+      check("and it offers a way to add one",
+            /Add Garment/i.test(txt));
+    }
+
+    /* ---- 3. an outfit can still be built with no accessories --------- */
+    read("switchTab('assistant')");
+    await wait(200);
+    let threw = "";
+    try { read("generateOutfit()"); } catch (e) { threw = String(e.message || e); }
+    await wait(600);
+    check("Generate still works with the accessory slots empty", threw === "", threw);
+    const slots = read("activeOutfit").slots;
+    const filled = Object.keys(slots).filter(c => slots[c].enabled && slots[c].itemId);
+    check("it still fills the garment slots", filled.length >= 3, filled.join(","));
+    check("no accessory slot claims to hold an item",
+          filled.filter(c => /^accessories/.test(c)).length === 0);
+
+    /* ---- 4. a closet saved BEFORE the removal ------------------------ */
+    /* a2/a3/a4 exactly as they shipped; a1 given a photograph by hand; and one
+       garment the wearer added, which is the thing that must not be touched */
+    const saved = [
+      { id: "a1", name: "Gold Flower Choker", category: "accessories_necklace",
+        emoji: "x", image: "assets/mannequin_base.jpg", color: "#FFD700", colorName: "Gold",
+        fabric: "18k Gold Plated", tags: ["party"], favorite: false },
+      { id: "a2", name: "Silver Pendant Chain", category: "accessories_necklace",
+        emoji: "x", color: "#C0C0C0", colorName: "Silver", fabric: "Sterling Silver",
+        tags: ["minimal"], favorite: false },
+      { id: "a3", name: "Pearl Beaded Bracelet", category: "accessories_bracelet",
+        emoji: "x", color: "#F8F0E3", colorName: "Pearl", fabric: "Pearl",
+        tags: ["date"], favorite: false },
+      { id: "a4", name: "Sage Velvet Headband", category: "accessories_headwear",
+        emoji: "x", color: "#8F9E8B", colorName: "Sage", fabric: "Velvet",
+        tags: ["cute"], favorite: false },
+      { id: "u1", name: "My Own Necklace", category: "accessories_necklace",
+        emoji: "x", color: "#123456", colorName: "Blue", fabric: "Cotton",
+        tags: ["casual"], favorite: false },
+      { id: "t1", name: "Pink Cable Knit Top", category: "tops",
+        image: "assets/pink_knit_top.jpg", color: "#F4C2C2", colorName: "Pink",
+        fabric: "Knit", tags: ["casual"], favorite: false }
+    ];
+    localStorage.setItem(KEY, JSON.stringify(saved));
+    win = await boot();
+    read = e => win.eval(e);
+    const after = read("wardrobe");
+    const ids = after.map(i => i.id).sort();
+
+    check("the three untouched placeholders are pruned",
+          ["a2", "a3", "a4"].every(id => ids.indexOf(id) < 0), ids.join(","));
+    /* the conservative half — someone gave this one a photograph, so it is
+       theirs now and the tidy-up leaves it alone */
+    check("a placeholder that was given a photograph is KEPT",
+          ids.indexOf("a1") >= 0, ids.join(","));
+    check("a garment the wearer added is untouched, even in the same category",
+          ids.indexOf("u1") >= 0, ids.join(","));
+    check("an ordinary garment is untouched", ids.indexOf("t1") >= 0);
+    check("the prune is written back, so it does not have to run again",
+          JSON.parse(localStorage.getItem(KEY)).length === after.length,
+          "stored " + JSON.parse(localStorage.getItem(KEY)).length + " vs live " + after.length);
+    check("nothing was re-seeded on top of the saved closet",
+          after.length === 3, after.length + ": " + ids.join(","));
+
+    /* ---- 5. run it twice: the prune must be idempotent -------------- */
+    win = await boot();
+    read = e => win.eval(e);
+    check("a second load changes nothing further", read("wardrobe").length === 3,
+          read("wardrobe").length);
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  /* leave no closet behind for the next probe in the sweep */
+  try { localStorage.removeItem(KEY); } catch (e) {}
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  say("\n" + report.passed + " passed, " + report.failed + " failed");
+  await post("/save?name=report.json",
+    btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+  await post("/done", "seed");
+})();
+</script>
+</body></html>

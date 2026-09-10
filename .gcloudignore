@@ -1,0 +1,31 @@
+# What Cloud Build does not need to see. Everything left is what the browser
+# actually asks for, plus the server that answers.
+
+.git/
+.gitignore
+
+# the test harness — 10 MB of fixtures, and nothing a served page requests
+lab/
+
+# documentation, and the PowerShell scripts that only make sense on a dev box
+# (server.ps1 and start.ps1 stay behind; deploy.ps1 runs FROM here, not IN the
+# image, so it is not needed either)
+docs/
+*.md
+*.html.bak
+*.ps1
+
+# an empty stray folder
+Pink Petal Closet/
+
+# the write-up. It is not part of the app, and shipping it would publish it at
+# a guessable URL alongside the app for no reason.
+Pink_Petal_Closet_*
+
+# The lookbook's nine stock photographs. That feature was removed, and a grep
+# of every js and html file finds no reference to any of them — only
+# mannequin_base.jpg, which the render is built on, is still used. Left on disk
+# and kept out of the image: ~5 MB that would otherwise be uploaded, stored and
+# served to the public to no end.
+assets/mannequin_*.jpg
+!assets/mannequin_base.jpg

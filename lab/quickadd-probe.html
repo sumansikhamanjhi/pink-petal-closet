@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Third quick action + heart size</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1340px;height:940px;border:0;background:#fff;opacity:0.22}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * Two small UI changes, measured rather than eyeballed:
+ *
+ *   1. "Add an Item" as a third quick action, on BOTH front ends. A third
+ *      button in a fixed-width row is exactly the change that clipped labels
+ *      the last two times, so every button is measured for overflow — and for
+ *      a non-zero width, because a row measured while its tab is hidden comes
+ *      back 0x0 and "no overflow" passes trivially on 0 <= 0.
+ *
+ *   2. the save-look heart at 16px. Checked as a real painted box, not as a
+ *      stylesheet string, since that is what the eye is judging.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const doc = win.document;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 100; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof switchTab === 'function'")) break;
+      await wait(250);
+    }
+
+    const fits = el => {
+      const r = el.getBoundingClientRect();
+      return { w: Math.round(r.width), over: el.scrollWidth - el.clientWidth,
+               lines: Math.round(r.height), text: el.textContent.trim() };
+    };
+
+    /* ---- 1. the web row ------------------------------------------------ */
+    read("switchTab('home')");
+    await wait(300);
+    const webRow = [...doc.querySelectorAll(".quick-buttons .btn")];
+    check("web home has three quick actions", webRow.length === 3, webRow.length + " buttons");
+    check("the third one is 'Add an Item'",
+          webRow[2] && webRow[2].textContent.trim() === "Add an Item",
+          webRow[2] ? webRow[2].textContent.trim() : "missing");
+
+    for (const b of webRow) {
+      const m = fits(b);
+      check("web: '" + m.text + "' is painted", m.w > 40, m.w + "px wide");
+      check("web: '" + m.text + "' text is not clipped", m.over <= 0, "overflow " + m.over + "px");
+    }
+    const webWraps = webRow.map(b => fits(b).lines);
+    check("web: no quick action wrapped to a second line",
+          Math.max(...webWraps) - Math.min(...webWraps) === 0, "heights " + webWraps.join("/"));
+
+    /* the button has to actually go somewhere */
+    webRow[2].click();
+    await wait(350);
+    check("web: 'Add an Item' opens the add screen",
+          doc.getElementById("web-sheet-add") &&
+          doc.getElementById("web-sheet-add").classList.contains("active"),
+          doc.getElementById("web-sheet-add")
+            ? doc.getElementById("web-sheet-add").className : "no sheet");
+    read("switchTab('home')");
+    await wait(300);
+
+    /* ---- 2. the phone row ---------------------------------------------- */
+    /* the phone pane is always on screen, so these are real boxes */
+    read("renderMobileScreen('home')");
+    await wait(300);
+    const mRow = [...doc.querySelectorAll("#mobile-body-container .m-row .btn")]
+                   .filter(b => /Closet|Stylist|Add/.test(b.textContent));
+    check("phone home has three quick actions", mRow.length === 3, mRow.length + " buttons");
+    check("the phone's third one is 'Add Item'",
+          mRow[2] && mRow[2].textContent.trim() === "Add Item",
+          mRow[2] ? mRow[2].textContent.trim() : "missing");
+
+    for (const b of mRow) {
+      const m = fits(b);
+      check("phone: '" + m.text + "' is painted", m.w > 20, m.w + "px wide");
+      check("phone: '" + m.text + "' text is not clipped", m.over <= 0, "overflow " + m.over + "px");
+    }
+    const mHeights = mRow.map(b => fits(b).lines);
+    check("phone: no quick action wrapped to a second line",
+          Math.max(...mHeights) - Math.min(...mHeights) === 0, "heights " + mHeights.join("/"));
+
+    const rowBox = mRow[0] ? mRow[0].parentElement.getBoundingClientRect() : null;
+    const lastBox = mRow[2] ? mRow[2].getBoundingClientRect() : null;
+    check("phone: the third button stays inside the screen",
+          rowBox && lastBox && lastBox.right <= rowBox.right + 1,
+          lastBox ? Math.round(lastBox.right) + " vs row right " + Math.round(rowBox.right) : "n/a");
+
+    /* ---- 3. the heart -------------------------------------------------- */
+    read("switchTab('assistant')");
+    await wait(300);
+    read("generateOutfit()");
+    await wait(900);
+    const save = doc.getElementById("btn-save-outfit");
+    check("the save-look button is on screen", !!save && save.offsetParent !== null);
+    const heart = save ? save.querySelector("svg") : null;
+    check("it still carries an icon", !!heart);
+    if (heart) {
+      const hb = heart.getBoundingClientRect();
+      check("the heart is 17px: down from 18, but not back to the 16 that read as too small",
+            Math.round(hb.width) === 17 && Math.round(hb.height) === 17,
+            Math.round(hb.width) + "x" + Math.round(hb.height));
+      const label = save.querySelector(".btn-label");
+      check("the words beside it are intact",
+            save.textContent.trim().length > 0 && save.scrollWidth - save.clientWidth <= 0,
+            JSON.stringify(save.textContent.trim()) + " overflow " +
+            (save.scrollWidth - save.clientWidth));
+    }
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  say("\n" + report.passed + " passed, " + report.failed + " failed");
+  await post("/save?name=report.json",
+    btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+  await post("/done", "quickadd");
+})();
+</script>
+</body></html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>App Smoke Test</title>
+<style>body{background:#111;color:#eee;font:13px system-ui;margin:0;padding:14px}
+iframe{width:1200px;height:900px;border:0;background:#fff}
+pre{white-space:pre-wrap;color:#9fd}</style>
+</head>
+<body>
+<div id="status">running…</div>
+<pre id="log"></pre>
+<iframe id="app" src="../index.html"></iframe>
+<script>
+const log = [];
+const say = t => { log.push(t); document.getElementById("log").textContent = log.join("\n"); console.log("[smoke]", t); };
+const post = (u, b) => fetch(u, { method: "POST", body: b }).catch(e => console.warn(e));
+
+const CASES = [
+  { file: "testset/casual_tshirt_jeans.jpg", mode: "top" },
+  { file: "testset/dress_red_runway.jpg",    mode: "dress" },
+  { file: "testset/mannequin_top_skirt.jpg", mode: "bottom" }
+];
+
+function toDataUrl(url) {
+  return fetch(url).then(r => r.blob()).then(b => new Promise(res => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.readAsDataURL(b);
+  }));
+}
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+async function saveImage(name, src) {
+  const img = new Image();
+  await new Promise(res => { img.onload = res; img.onerror = res; img.src = src; });
+  if (!img.width) { say("  ! could not decode " + name); return; }
+  const cv = document.createElement("canvas");
+  cv.width = img.width; cv.height = img.height;
+  const c = cv.getContext("2d");
+  for (let y = 0; y < cv.height; y += 12)
+    for (let x = 0; x < cv.width; x += 12) {
+      c.fillStyle = ((x / 12 + y / 12) % 2 === 0) ? "#fff" : "#c9c9d6";
+      c.fillRect(x, y, 12, 12);
+    }
+  c.drawImage(img, 0, 0);
+  await post("/save?name=" + encodeURIComponent(name), cv.toDataURL("image/png"));
+}
+
+(async function () {
+  const report = { cases: [], errors: [] };
+  try {
+    const frame = document.getElementById("app");
+    await new Promise(res => { frame.onload = res; });
+    const win = frame.contentWindow;
+    const doc = frame.contentDocument;
+    say("app loaded; engine present: " + !!win.GarmentEngine);
+    report.enginePresent = !!win.GarmentEngine;
+    report.engineStatus = win.GarmentEngine ? win.GarmentEngine.status() : null;
+
+    // surface any error the app throws while we drive it
+    win.onerror = (m, s, l) => { report.errors.push(m + " @" + l); say("PAGE ERROR: " + m); };
+
+    for (const c of CASES) {
+      const entry = { file: c.file, mode: c.mode };
+      const dataUrl = await toDataUrl(c.file);
+
+      // drive it exactly like the uploader does
+      win.currentRawImageSrc = dataUrl;
+      win.extractionMode = c.mode;
+      const t0 = performance.now();
+      await win.runExtractionPipeline(dataUrl, null, c.file.split("/").pop(), c.mode);
+      entry.ms = Math.round(performance.now() - t0);
+
+      const prev = doc.getElementById("preview-img");
+      const loader = doc.getElementById("dropzone-loader");
+      entry.previewVisible = doc.getElementById("dropzone-preview").style.display !== "none";
+      entry.loaderHidden = loader.style.display === "none";
+      entry.imageIsCutout = !!prev.src && prev.src !== dataUrl && prev.src.length > 200;
+      entry.imageFormat = (prev.src.match(/^data:([^;]+)/) || [])[1] || null;
+      entry.imageKb = Math.round(prev.src.length / 1024);
+      entry.form = {
+        name: doc.getElementById("item-name").value,
+        category: doc.getElementById("item-category").value,
+        color: doc.getElementById("item-color").value,
+        colorName: doc.getElementById("item-color-name").value,
+        tags: doc.getElementById("item-tags").value
+      };
+      say(`${c.file} [${c.mode}] -> ${entry.imageFormat} ${entry.imageKb}KB, ` +
+          `${entry.form.category}/${entry.form.colorName}, ${entry.ms}ms`);
+      await saveImage("app_" + c.file.split("/").pop().replace(/\.\w+$/, "") + "_" + c.mode + ".png", prev.src);
+      report.cases.push(entry);
+    }
+
+    // The studio, driven the way a user drives it: upload through the real
+    // handler (so the app's own state is set), open the studio, click the
+    // garment. Nothing here reaches into script-scoped variables.
+    const studio = { };
+    const blob = await fetch(CASES[0].file).then(r => r.blob());
+    const file = new win.File([blob], "casual_tshirt_jeans.jpg", { type: "image/jpeg" });
+    await win.handleImageUpload(file);
+    await wait(4000);
+    studio.uploadSetPreview = doc.getElementById("preview-img").src.length > 200;
+
+    win.openStudioModal();
+    await wait(800);
+    const canvas = doc.getElementById("crop-canvas");
+    const wrapper = doc.getElementById("crop-canvas-wrapper");
+    studio.canvas = canvas.width + "x" + canvas.height;
+    studio.studioOpened = doc.getElementById("crop-modal").style.display === "flex";
+
+    // click on the jeans, low in the frame
+    const rect = canvas.getBoundingClientRect();
+    const cx = rect.left + rect.width * 0.5;
+    const cy = rect.top + rect.height * 0.72;
+    const ev = type => new win.MouseEvent(type, { clientX: cx, clientY: cy, bubbles: true });
+    wrapper.dispatchEvent(ev("mousedown"));
+    wrapper.dispatchEvent(ev("mouseup"));
+    await wait(4000);
+    studio.hintDotShown = !!doc.getElementById("studio-hint-dot") &&
+                          doc.getElementById("studio-hint-dot").style.display === "block";
+    studio.status = doc.getElementById("studio-status").textContent;
+    studio.previewShown = doc.getElementById("studio-preview-img").style.display === "block";
+    const sp = doc.getElementById("studio-preview-img").src;
+    studio.previewKb = Math.round((sp || "").length / 1024);
+    await saveImage("app_studio_tap_jeans.png", sp);
+    say("studio tap -> " + studio.status);
+
+    // and confirm the tap flows through Apply into the upload form
+    win.applyStudioCutout();
+    await wait(3500);
+    studio.appliedCategory = doc.getElementById("item-category").value;
+    studio.appliedColor = doc.getElementById("item-color-name").value;
+    await saveImage("app_studio_applied.png", doc.getElementById("preview-img").src);
+    say("applied -> " + studio.appliedCategory + " / " + studio.appliedColor);
+    report.studio = studio;
+
+    // and that saving into the closet keeps the cutout (read through
+    // localStorage, which is the app's own source of truth)
+    const readCloset = () => JSON.parse(win.localStorage.getItem("pp_wardrobe_v3") || "[]");
+    const before = readCloset().length;
+    doc.getElementById("item-name").value = "Smoke Test Garment";
+    win.saveUploadedItem();
+    await wait(400);
+    const after = readCloset();
+    const saved = after.find(i => i.name === "Smoke Test Garment");
+    report.savedItem = {
+      before, after: after.length,
+      found: !!saved,
+      imageFormat: saved && (saved.image || "").slice(5, 15),
+      imageKb: saved ? Math.round(saved.image.length / 1024) : 0,
+      closetKb: Math.round(win.localStorage.getItem("pp_wardrobe_v3").length / 1024),
+      renderedInCloset: !!doc.querySelector('.closet-grid img[src^="data:image"]')
+    };
+    say("closet save -> " + JSON.stringify(report.savedItem));
+    // leave their closet as we found it
+    win.localStorage.setItem("pp_wardrobe_v3",
+      JSON.stringify(after.filter(i => i.name !== "Smoke Test Garment")));
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  document.getElementById("status").textContent = "done";
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body>
+</html>

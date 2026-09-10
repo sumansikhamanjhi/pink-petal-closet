@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>dresses, toggles and loaders</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}iframe{width:1400px;height:1000px;border:0;opacity:.12}</style></head>
+<body><pre id="log">running…</pre><iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [], shapes: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * Four things, all of which were reported by looking at the screen.
+ *
+ *  1. DRESSES were never picked. `useDress` was a bare keyword test, so a
+ *     dress appeared only if the prompt literally said dress, wedding, gala,
+ *     cocktail, fancy, prom or ball — and because the slot controls skip a
+ *     disabled slot, the one row that could have turned the dress slot on
+ *     vanished exactly when a dress was not already being worn.
+ *  2. The render button said "See It Worn" while a render was already on
+ *     screen, and pressing it spent money on another one. There was no way
+ *     back to the pieces.
+ *  3. Both loaders were the same spinning ring.
+ *  4. The look-card buttons were three different widths and "See it worn"
+ *     wrapped onto three lines.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    localStorage.removeItem("pp_outfit_shape");
+    localStorage.removeItem("pp_looks_v1");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow, doc = win.document;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 120; i++) {
+      if (read("typeof generateOutfit === 'function' && typeof wardrobe !== 'undefined' && wardrobe.length")) break;
+      await wait(250);
+    }
+    read("switchTab")("assistant");
+    await wait(400);
+
+    /* ---- 1. can a dress ever be chosen? ---- */
+    const dressCount = read("wardrobe").filter(i => i.category === "dresses").length;
+    check("the closet has dresses to choose from", dressCount >= 2, dressCount + " dresses");
+
+    const PROMPTS = ["date night", "birthday party", "diwali dinner", "office meeting",
+                     "gym workout", "beach holiday", "cocktail party"];
+    for (const p of PROMPTS) {
+      read("generateOutfit")(p);
+      await wait(300);
+      const slots = read("activeOutfit").slots;
+      const worn = slots.dresses.enabled && slots.dresses.itemId
+        ? (read("wardrobe").find(i => i.id === slots.dresses.itemId) || {}).name
+        : null;
+      report.shapes.push({ prompt: p, vibe: read("currentVibeCategory"),
+                           dressEnabled: slots.dresses.enabled, dress: worn });
+      say("  " + p.padEnd(18) + " -> " + read("currentVibeCategory").padEnd(8) +
+          (worn ? "  DRESS: " + worn : "  top + bottom"));
+      flush();
+    }
+    const everDress = report.shapes.filter(s => s.dress);
+    check("a dress is now reachable without typing the word 'dress'",
+          everDress.some(s => !/dress|cocktail|wedding|gala|prom|ball|fancy/i.test(s.prompt)),
+          everDress.map(s => s.prompt).join(", ") || "never chosen");
+    check("and separates still win where a dress makes no sense",
+          report.shapes.filter(s => /office|gym/.test(s.prompt)).every(s => !s.dress),
+          report.shapes.filter(s => /office|gym/.test(s.prompt))
+            .map(s => s.prompt + "=" + (s.dress || "separates")).join(", "));
+
+    /* ---- the control that was missing ---- */
+    const shapeSwitch = doc.querySelector(".shape-switch");
+    check("there is a dress / top+bottom control at all", !!shapeSwitch,
+          shapeSwitch ? shapeSwitch.textContent.replace(/\s+/g, " ").trim() : "missing");
+
+    read("generateOutfit")("office meeting");
+    await wait(300);
+    check("...and it is shown even when the dress slot is OFF, which is when it is needed",
+          !read("activeOutfit").slots.dresses.enabled && !!doc.querySelector(".shape-switch"),
+          "dress slot enabled=" + read("activeOutfit").slots.dresses.enabled);
+
+    read("setOutfitShape")("dress");
+    await wait(500);
+    const forced = read("activeOutfit").slots;
+    check("choosing 'Dress' puts a dress on, whatever the prompt says",
+          forced.dresses.enabled && !!forced.dresses.itemId && !forced.tops.enabled,
+          (read("wardrobe").find(i => i.id === forced.dresses.itemId) || {}).name);
+    check("the choice is remembered, so it need not be repeated every prompt",
+          localStorage.getItem("pp_outfit_shape") === "dress",
+          localStorage.getItem("pp_outfit_shape"));
+
+    read("setOutfitShape")("separates");
+    await wait(500);
+    check("choosing 'Top + bottom' keeps dresses out even for a cocktail party",
+          (read("generateOutfit")("cocktail party"), await wait(300),
+           !read("activeOutfit").slots.dresses.enabled),
+          "dress enabled=" + read("activeOutfit").slots.dresses.enabled);
+    read("setOutfitShape")("auto");
+    await wait(400);
+
+    /* ---- 2. the render button is a toggle ---- */
+    const btn = doc.getElementById("btn-ai-tryon");
+    const again = doc.getElementById("btn-ai-rerender");
+    check("the render button and a separate re-render control both exist",
+          !!btn && !!again);
+    const labelOf = b => b.querySelector(".btn-label").textContent.trim();
+    check("with no render on screen it offers to make one",
+          labelOf(btn) === "See It Worn", labelOf(btn));
+    check("and re-render is hidden, because there is nothing to re-render",
+          win.getComputedStyle(again).display === "none",
+          win.getComputedStyle(again).display);
+
+    // put a render on screen without paying: the store is the same one a real
+    // render writes to
+    read("generateOutfit")("date night");
+    await wait(600);
+    const sig = read("outfitSignature")(read("currentOutfitLayers()"));
+    const flatSrc = doc.getElementById("mannequin-render").src;
+    await read("rememberLookRender")(sig, flatSrc);
+    await wait(300);
+    await read("toggleWornView")();
+    await wait(600);
+    check("pressing it shows the stored render", !!read("currentMannequinRender"));
+    check("the button then says 'Show pieces'", labelOf(btn) === "Show pieces", labelOf(btn));
+    check("and the re-render control appears alongside it",
+          win.getComputedStyle(again).display !== "none",
+          win.getComputedStyle(again).display);
+    await read("toggleWornView")();
+    await wait(900);
+    check("pressing again goes back to the pieces, without spending anything",
+          !read("currentMannequinRender") && labelOf(btn) === "See It Worn",
+          labelOf(btn));
+
+    /* THE LABEL MUST FOLLOW THE PICTURE ON EVERY ROUTE, not just the toggle.
+       Generate, Shuffle and Wear-this all redraw the board and land on the flat
+       display, and none of them went through the toggle — so after one render
+       the button read "Show pieces" for the rest of the session, offering to
+       show pieces that were already on screen. Each route is exercised here
+       from the render state, because that is the only state where it was
+       wrong. */
+    const backToRender = async () => {
+      await read("toggleWornView")();
+      await wait(700);
+      return labelOf(btn);
+    };
+    check("with the render up, the label says so", (await backToRender()) === "Show pieces",
+          labelOf(btn));
+    read("generateOutfit")("date night");
+    await wait(900);
+    check("Generate returns to the pieces AND resets the label",
+          !read("currentMannequinRender") && labelOf(btn) === "See It Worn",
+          "render=" + !!read("currentMannequinRender") + " label=" + labelOf(btn));
+
+    await read("rememberLookRender")(read("outfitSignature")(read("currentOutfitLayers()")),
+                                     doc.getElementById("mannequin-render").src);
+    await wait(200);
+    check("with the render up again", (await backToRender()) === "Show pieces", labelOf(btn));
+    read("shuffleOutfit")();
+    await wait(900);
+    check("Shuffle returns to the pieces AND resets the label",
+          !read("currentMannequinRender") && labelOf(btn) === "See It Worn",
+          "render=" + !!read("currentMannequinRender") + " label=" + labelOf(btn));
+
+    /* ---- the icon that was a speck ---- */
+    const heart = doc.querySelector("#btn-save-outfit .btn-icon");
+    const heartBox = heart && heart.getBoundingClientRect();
+    report.heart = heartBox && { w: Math.round(heartBox.width), h: Math.round(heartBox.height) };
+    check("the heart on Save This Look is big enough to see",
+          heartBox && heartBox.width >= 17, report.heart ? report.heart.w + "px" : "missing");
+
+    /* ---- the add-item loader is a circle, and provably round ---- */
+    const ring = doc.querySelector("#dropzone-loader .ring-loader");
+    check("the add-item loader is a plain ring again", !!ring);
+    if (ring) {
+      /* Measured on the Add tab, with the loader actually shown. The first
+         version of this measured it while the whole sheet was display:none,
+         got 0 x 0 back, and passed "width equals height" — a check that
+         cannot fail is not a check. The non-zero assertion is the guard
+         against measuring nothing again. */
+      read("switchTab")("add");
+      await wait(400);
+      const dl = doc.getElementById("dropzone-loader");
+      const prompt = doc.querySelector(".dropzone-prompt");
+      const wasShown = dl.style.display;
+      if (prompt) prompt.style.display = "none";
+      dl.style.display = "block";
+      await wait(300);
+      const rb = ring.getBoundingClientRect();
+      report.ring = { w: Math.round(rb.width), h: Math.round(rb.height) };
+      check("the ring is actually on screen to be measured",
+            rb.width > 10, rb.width + " x " + rb.height);
+      check("and it is round, not an oval — width equals height",
+            rb.width > 10 && Math.abs(rb.width - rb.height) <= 1,
+            Math.round(rb.width) + " x " + Math.round(rb.height));
+      check("with a circular radius", win.getComputedStyle(ring).borderRadius.indexOf("50%") === 0,
+            win.getComputedStyle(ring).borderRadius);
+      dl.style.display = wasShown;
+      if (prompt) prompt.style.display = "";
+    }
+
+    /* ---- 3. the loaders ---- */
+    check("the spinning ring is gone from both waits",
+          !doc.querySelector("#dropzone-loader .spinner") &&
+          !doc.querySelector("#mannequin-loading .spinner"));
+    check("adding an item shows a plain ring, the scan animation having gone",
+          !!doc.querySelector("#dropzone-loader .ring-loader") &&
+          !doc.querySelector("#dropzone-loader .scan-loader-line"));
+    check("rendering shows a figure being dressed, with a progress track",
+          !!doc.querySelector("#mannequin-loading .dress-loader-sweep") &&
+          !!doc.querySelector("#mannequin-loading .dress-loader-track span"));
+    const narration = read("RENDER_NARRATION");
+    check("the render wait has something to read, in the order the work happens",
+          Array.isArray(narration) && narration.length >= 6,
+          narration.length + " lines, last: " + JSON.stringify(narration[narration.length - 1]));
+
+    /* ---- 4. the look-card buttons ---- */
+    read("switchTab")("assistant");
+    await wait(300);
+    await read("saveOutfit")();
+    await wait(500);
+    read("switchTab")("looks");
+    await wait(400);
+    const card = doc.querySelector("#looks-grid .look-card");
+    check("a saved look renders a card", !!card);
+    const btns = [...card.querySelectorAll(".look-actions .btn")];
+    report.buttonBoxes = btns.map(b => {
+      const label = b.querySelector(".btn-label");
+      return {
+        text: b.textContent.replace(/\s+/g, " ").trim(),
+        w: Math.round(b.getBoundingClientRect().width),
+        h: Math.round(b.getBoundingClientRect().height),
+        // the direct test for "W…": the content is wider than the box it is in
+        clipped: !!label && label.scrollWidth > label.clientWidth + 1,
+        boxClipped: b.scrollWidth > b.clientWidth + 1
+      };
+    });
+    say("\ncard buttons: " + JSON.stringify(report.buttonBoxes));
+    const heights = report.buttonBoxes.map(b => b.h);
+    check("every button in the row is the same height — none has wrapped",
+          Math.max(...heights) - Math.min(...heights) <= 1, heights.join(", "));
+    const lineH = parseFloat(win.getComputedStyle(btns[0]).fontSize) * 2;
+    check("no button is more than one line tall",
+          heights.every(h => h < lineH + 18), "heights " + heights.join(",") +
+          " against a two-line threshold of " + Math.round(lineH + 18));
+    /* THE CHECK THAT WAS MISSING. Same height and one line were both true of
+       a button reading "W…" — the label had simply been clipped, and an
+       ellipsis is invisible to a height measurement. This compares the label's
+       content width against the space it has, which is what "can you read it"
+       actually means. */
+    const clipped = report.buttonBoxes.filter(b => b.clipped || b.boxClipped);
+    check("no button label is clipped — every word is fully readable",
+          clipped.length === 0,
+          clipped.map(b => JSON.stringify(b.text) + " in " + b.w + "px").join(", ") ||
+          report.buttonBoxes.map(b => JSON.stringify(b.text) + "@" + b.w + "px").join(" "));
+    check("no label is longer than one word",
+          report.buttonBoxes.every(b => b.text.split(" ").length <= 1),
+          report.buttonBoxes.map(b => JSON.stringify(b.text)).join(", "));
+    check("delete is icon-only, so it cannot wrap at all",
+          !!card.querySelector(".look-actions .btn-icon-only"));
+
+    /* And at a genuinely narrow width, because the panel shrinks with the
+       window and that is where the clipping first appeared. */
+    frame.style.width = "980px";
+    await wait(700);
+    read("renderLooks")();
+    await wait(300);
+    const narrowCard = doc.querySelector("#looks-grid .look-card");
+    const narrow = [...narrowCard.querySelectorAll(".look-actions .btn")].map(b => {
+      const label = b.querySelector(".btn-label");
+      return { text: b.textContent.replace(/\s+/g, " ").trim(),
+               w: Math.round(b.getBoundingClientRect().width),
+               clipped: !!label && label.scrollWidth > label.clientWidth + 1 };
+    });
+    report.narrowButtons = narrow;
+    check("still readable when the window is narrow",
+          narrow.every(b => !b.clipped),
+          narrow.map(b => JSON.stringify(b.text) + "@" + b.w + "px").join(" "));
+    frame.style.width = "1400px";
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

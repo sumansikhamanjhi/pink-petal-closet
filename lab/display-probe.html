@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Display board</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}
+.shelf{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start}
+canvas{border:1px solid #333;max-height:420px}</style></head>
+<body>
+<pre id="log">running…</pre>
+<div class="shelf" id="shelf"></div>
+<script src="../modules/seg-watershed.js"></script>
+<script src="../modules/garment-cutout.js"></script>
+<script src="../modules/outfit-display.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [], boards: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * The display board: the pieces that were picked, on white, no mannequin.
+ *
+ * The things that can actually go wrong here are all measurable, so none of
+ * them are left to the eye:
+ *
+ *   nothing dropped   every piece handed in must appear. A layout that runs
+ *                     out of room and silently loses the bracelet answers the
+ *                     one question this view exists to answer — what was
+ *                     picked — with a lie.
+ *   nothing clipped   every box inside the canvas.
+ *   no overlap        pieces must not sit on top of one another; the point is
+ *                     to see each one.
+ *   legible smalls    a bracelet is a thin sliver of a photograph. Scaled by
+ *                     any honest rule it vanishes, so there is a floor, and the
+ *                     floor has to bite.
+ *   still an outfit   a dress must read bigger than a bracelet. A board where
+ *                     everything is the same size is a spreadsheet.
+ *   white, and white  the background must be white to the corners — that is
+ *                     what "no mannequin" means in pixels.
+ */
+const FIXTURES = [
+  ["dresses", "fixtures/fixture_d1_dresses.png"],
+  ["dresses", "fixtures/fixture_d2_dresses.png"],
+  ["tops", "fixtures/fixture_t1_tops.png"],
+  ["tops", "fixtures/fixture_t6_tops.png"],
+  ["bottoms", "fixtures/fixture_b1_bottoms.png"],
+  ["bottoms", "fixtures/fixture_b3_bottoms.png"],
+  ["jackets", "fixtures/fixture_j1_jackets.png"],
+  ["footwear", "fixtures/fixture_f1_footwear.png"],
+  ["footwear", "fixtures/fixture_f2_footwear.png"],
+  ["bags", "fixtures/fixture_bg1_bags.png"]
+];
+
+const load = src => new Promise((ok, no) => {
+  const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error(src)); i.src = src;
+});
+
+/**
+ * A stand-in for the small things the fixture set has none of.
+ *
+ * A bracelet is not a small garment, it is a differently-shaped one: a wide
+ * flat oval a few dozen pixels tall, which is exactly the case the size floor
+ * is for. Drawing one rather than skipping it means the floor is tested
+ * against the shape that breaks it.
+ */
+function syntheticTrinket(w, h, colour) {
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d");
+  c.strokeStyle = colour;
+  c.lineWidth = Math.max(3, Math.round(h * 0.22));
+  c.beginPath();
+  c.ellipse(w / 2, h / 2, w / 2 - c.lineWidth, h / 2 - c.lineWidth, 0, 0, Math.PI * 2);
+  c.stroke();
+  return cv;
+}
+
+function overlaps(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+function cornerWhite(canvas) {
+  const c = canvas.getContext("2d");
+  const pts = [[2, 2], [canvas.width - 3, 2], [2, canvas.height - 3],
+               [canvas.width - 3, canvas.height - 3], [canvas.width >> 1, 3]];
+  const bad = [];
+  for (const [x, y] of pts) {
+    const d = c.getImageData(x, y, 1, 1).data;
+    if (d[0] < 250 || d[1] < 250 || d[2] < 250) bad.push(x + "," + y + "=" + d[0] + "/" + d[1] + "/" + d[2]);
+  }
+  return bad;
+}
+
+(async function () {
+  try {
+    check("the display module loaded", !!window.OutfitDisplay);
+
+    const pieces = {};
+    for (const [cat, src] of FIXTURES) {
+      try { (pieces[cat] = pieces[cat] || []).push(await load(src)); }
+      catch (e) { say("could not load " + src); }
+    }
+    check("garment fixtures loaded",
+          Object.keys(pieces).length >= 5, Object.keys(pieces).join(","));
+
+    const bracelet = syntheticTrinket(340, 74, "#b8935f");
+    const necklace = syntheticTrinket(150, 260, "#c9c2b6");
+    const headband = syntheticTrinket(260, 90, "#8a9b7a");
+
+    const BOARDS = [
+      { name: "dress only", items: [
+        { category: "dresses", name: "Burgundy Cocktail Dress", cutout: pieces.dresses[0] }
+      ] },
+      { name: "top skirt shoes", items: [
+        { category: "tops", name: "Rust Ribbed Top", cutout: pieces.tops[0] },
+        { category: "bottoms", name: "Sage Pleated Skirt", cutout: pieces.bottoms[0] },
+        { category: "footwear", name: "Cream Sneakers", cutout: pieces.footwear[0] }
+      ] },
+      { name: "the full look", items: [
+        { category: "tops", name: "White Ribbed Top", cutout: pieces.tops[1] },
+        { category: "bottoms", name: "Dark Skinny Jeans", cutout: pieces.bottoms[1] },
+        { category: "jackets", name: "Navy Denim Jacket", cutout: pieces.jackets[0] },
+        { category: "footwear", name: "Black Ankle Boots", cutout: pieces.footwear[1] },
+        { category: "bags", name: "Sage Handbag", cutout: pieces.bags[0] },
+        { category: "accessories_necklace", name: "Silver Pendant", cutout: necklace },
+        { category: "accessories_bracelet", name: "Pearl Bracelet", cutout: bracelet },
+        { category: "accessories_headwear", name: "Velvet Headband", cutout: headband }
+      ] },
+      { name: "one bracelet alone", items: [
+        { category: "accessories_bracelet", name: "Pearl Bracelet", cutout: bracelet }
+      ] },
+      { name: "nothing at all", items: [] }
+    ];
+
+    for (const board of BOARDS) {
+      const res = window.OutfitDisplay.render(board.items);
+      document.getElementById("shelf").appendChild(res.canvas);
+      const entry = { name: board.name, handedIn: board.items.length,
+                      placed: res.placed.length, rows: res.rows,
+                      scale: res.scale, boardH: res.height, boxes: res.placed };
+      report.boards.push(entry);
+      say(board.name + ": " + res.placed.length + "/" + board.items.length +
+          " placed in " + res.rows + " rows, scale " + res.scale + ", board " + res.width + "x" + res.height);
+
+      check("[" + board.name + "] every piece handed in is on the board",
+            res.placed.length === board.items.length,
+            res.placed.length + " of " + board.items.length);
+      check("[" + board.name + "] nothing is clipped by the canvas edge",
+            res.placed.every(p => p.x >= 0 && p.y >= 0 &&
+                                  p.x + p.w <= res.width && p.y + p.h <= res.height),
+            res.placed.filter(p => p.x < 0 || p.y < 0 || p.x + p.w > res.width ||
+                                   p.y + p.h > res.height).map(p => p.category).join(",") || "all inside");
+      let clash = null;
+      for (let i = 0; i < res.placed.length && !clash; i++) {
+        for (let j = i + 1; j < res.placed.length; j++) {
+          if (overlaps(res.placed[i], res.placed[j])) {
+            clash = res.placed[i].category + " over " + res.placed[j].category; break;
+          }
+        }
+      }
+      check("[" + board.name + "] no two pieces overlap", !clash, clash || "clear");
+      const bad = cornerWhite(res.canvas);
+      check("[" + board.name + "] the board is white to its corners — no mannequin",
+            bad.length === 0, bad.join(" ") || "white");
+
+      await post("/save?name=board_" + board.name.replace(/\W+/g, "_") + ".png",
+                 res.canvas.toDataURL("image/png"));
+      flush();
+    }
+
+    /* --- the size rules, on the board that has everything --- */
+    const full = report.boards.find(b => b.name === "the full look");
+    const box = c => full.boxes.find(p => p.category === c);
+    const braceletBox = box("accessories_bracelet");
+    const H = window.OutfitDisplay.CONFIG.height, W = window.OutfitDisplay.CONFIG.width;
+    report.braceletShare = { h: +(braceletBox.h / H).toFixed(3), w: +(braceletBox.w / W).toFixed(3) };
+    check("a bracelet is big enough to recognise",
+          braceletBox.h >= H * 0.045 || braceletBox.w >= W * 0.12,
+          braceletBox.w + "x" + braceletBox.h + " on a " + W + "x" + H + " board");
+    check("but it is still clearly smaller than the clothes",
+          braceletBox.h < box("bottoms").h * 0.6,
+          "bracelet " + braceletBox.h + " vs jeans " + box("bottoms").h);
+    check("the biggest piece is a garment, not an accessory",
+          ["tops", "bottoms", "jackets", "dresses"].indexOf(
+            full.boxes.slice().sort((a, b) => b.h * b.w - a.h * a.w)[0].category) >= 0,
+          full.boxes.slice().sort((a, b) => b.h * b.w - a.h * a.w)[0].category);
+
+    /* A lone bracelet: enlarged, but only by the amount the module says it may
+       be. "Does not fill the board" is the wrong test — on a board containing
+       nothing else there is no scale to be out of proportion with, and the
+       board itself shrinks to fit. What must hold is that the enlargement is
+       bounded by growLimit rather than by whatever space happens to be free,
+       because that bound is the only thing keeping the size floor from becoming
+       a size target. */
+    const alone = report.boards.find(b => b.name === "one bracelet alone");
+    const cfg = window.OutfitDisplay.CONFIG;
+    const braceletCeiling =
+      Math.ceil(Math.max(cfg.minHeight, window.OutfitDisplay.DISPLAY_HEIGHT.accessories_bracelet) *
+                H * cfg.growLimit) + 2;
+    check("a bracelet on its own is enlarged, but only within the stated limit",
+          alone.boxes[0].h > H * cfg.minHeight && alone.boxes[0].h <= braceletCeiling,
+          alone.boxes[0].w + "x" + alone.boxes[0].h + ", ceiling " + braceletCeiling);
+    check("and the board shrinks to it rather than leaving a field of white",
+          alone.boardH <= H * cfg.minBoardHeight + 1,
+          alone.boardH + " tall of a possible " + H);
+
+    const empty = report.boards.find(b => b.name === "nothing at all");
+    check("an empty look gives a blank white board, not an error",
+          empty.placed === 0, empty.placed + " placed");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

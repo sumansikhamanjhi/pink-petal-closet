@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Garment Isolation Lab</title>
+<style>
+  body { font: 13px/1.5 system-ui, sans-serif; background: #14131a; color: #eee; margin: 0; padding: 18px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .case { margin: 16px 0; padding: 10px; background: #1e1d26; border-radius: 10px; }
+  .case h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  .metrics { font-family: ui-monospace, monospace; font-size: 11px; color: #9fd; white-space: pre-wrap; }
+  .warn { color: #fc8; }
+  .err { color: #f77; font-weight: 600; }
+  canvas { display: block; max-width: 100%; border-radius: 6px; }
+  #status { padding: 8px 12px; background: #2b2a36; border-radius: 8px; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>Garment Isolation Lab</h1>
+<div id="status">booting…</div>
+<div id="cases"></div>
+
+<script src="../garment-engine.js"></script>
+<script>
+const CASES = [
+  { file: "testset/dress_red_runway.jpg",    mode: "dress", backend: "heuristic" },
+  { file: "testset/mannequin_dress.jpg",     mode: "dress", backend: "heuristic" },
+  { file: "testset/mannequin_top_skirt.jpg", mode: "bottom", backend: "heuristic" },
+  { file: "testset/casual_tshirt_jeans.jpg", mode: "top",   backend: "heuristic" },
+  { file: "testset/dress_red_runway.jpg",    mode: "dress"  },
+  { file: "testset/dress_white_outdoor.jpg", mode: "dress"  },
+  { file: "testset/dress_long_1997.jpg",     mode: "dress"  },
+  { file: "testset/dress_dark_runway.jpg",   mode: "dress"  },
+  { file: "testset/casual_tshirt_jeans.jpg", mode: "top"    },
+  { file: "testset/casual_tshirt_jeans.jpg", mode: "bottom" },
+  { file: "testset/casual_tshirt_jeans.jpg", mode: "auto"   },
+  { file: "testset/mannequin_top_skirt.jpg", mode: "top"    },
+  { file: "testset/mannequin_top_skirt.jpg", mode: "bottom" },
+  { file: "testset/mannequin_dress.jpg",     mode: "dress"  },
+  // the app's own shipped flat-lay assets: no person, white background, hangers
+  { file: "../assets/sage_pleated_skirt.jpg", mode: "bottom" },
+  { file: "../assets/pink_knit_top.jpg",      mode: "top" },
+  { file: "../assets/floral_white_dress.jpg", mode: "dress" },
+  { file: "../assets/cream_retro_sneakers.jpg", mode: "footwear" }
+];
+
+const statusEl = document.getElementById("status");
+const casesEl = document.getElementById("cases");
+const report = { cases: [], engine: null, startedAt: new Date().toISOString() };
+
+function setStatus(t) { statusEl.textContent = t; console.log("[lab]", t); }
+
+function post(url, body) {
+  return fetch(url, { method: "POST", body }).catch(e => console.warn("post failed", url, e));
+}
+
+function checkerboard(ctx, w, h, size) {
+  for (let y = 0; y < h; y += size) {
+    for (let x = 0; x < w; x += size) {
+      ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? "#ffffff" : "#dcdce4";
+      ctx.fillRect(x, y, size, size);
+    }
+  }
+}
+
+/** Builds a 5-panel review sheet: source | classes | pieces | matte | cutout. */
+function buildSheet(img, result, panelH) {
+  const dbg = result._debug;
+  const w = dbg.w, h = dbg.h;
+  const scale = panelH / h;
+  const pw = Math.round(w * scale);
+  const GAP = 8, N = 5;
+  const sheet = document.createElement("canvas");
+  sheet.width = pw * N + GAP * (N - 1);
+  sheet.height = panelH;
+  const ctx = sheet.getContext("2d");
+  ctx.fillStyle = "#101018";
+  ctx.fillRect(0, 0, sheet.width, sheet.height);
+  const px = x => x * (pw + GAP);
+
+  const layer = (paint) => {
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const c = cv.getContext("2d");
+    const d = c.createImageData(w, h);
+    paint(d.data);
+    c.putImageData(d, 0, 0);
+    return cv;
+  };
+
+  // 1 source
+  ctx.drawImage(img, px(0), 0, pw, panelH);
+
+  // 2 semantic classes
+  const sem = dbg.sem;
+  const COL = [[20,20,28],[60,110,255],[255,150,60],[255,230,80],[60,220,120],[255,60,60]];
+  ctx.drawImage(layer(d => {
+    for (let p = 0; p < w * h; p++) {
+      const v = [sem.bg[p], sem.hair[p], sem.skin[p], sem.face[p], sem.clothes[p], sem.other[p]];
+      let bi = 0;
+      for (let i = 1; i < 6; i++) if (v[i] > v[bi]) bi = i;
+      d[p*4] = COL[bi][0]; d[p*4+1] = COL[bi][1]; d[p*4+2] = COL[bi][2]; d[p*4+3] = 255;
+    }
+  }), px(1), 0, pw, panelH);
+
+  // 3 colour clusters + piece bands
+  const CL = [[0,0,0],[240,80,140],[80,180,240],[250,200,60],[140,240,120],[200,120,255]];
+  ctx.drawImage(layer(d => {
+    for (let p = 0; p < w * h; p++) {
+      const a = dbg.assign[p];
+      const c = CL[a % CL.length];
+      d[p*4] = c[0]; d[p*4+1] = c[1]; d[p*4+2] = c[2]; d[p*4+3] = a ? 255 : 40;
+    }
+  }), px(2), 0, pw, panelH);
+  ctx.font = "11px monospace";
+  dbg.pieces.forEach((pc, i) => {
+    ctx.strokeStyle = (i === dbg.sel.index) ? "#00ff88" : "#ffffff";
+    ctx.lineWidth = (i === dbg.sel.index) ? 2 : 1;
+    ctx.strokeRect(px(2) + 1, pc.top * scale, pw - 2, Math.max(2, (pc.bot - pc.top) * scale));
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fillText("p" + i, px(2) + 4, pc.top * scale + 12);
+  });
+
+  // 4 final matte over the source
+  ctx.drawImage(img, px(3), 0, pw, panelH);
+  ctx.drawImage(layer(d => {
+    for (let p = 0; p < w * h; p++) {
+      d[p*4] = 255; d[p*4+1] = 40; d[p*4+2] = 190;
+      d[p*4+3] = Math.round(dbg.alpha[p] * 150);
+    }
+  }), px(3), 0, pw, panelH);
+  const a = result.anatomy;
+  [["#0ff", a.shoulderY], ["#ff0", a.hipY], ["#0f0", a.kneeY]].forEach(([col, yy]) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px(3), yy * scale); ctx.lineTo(px(3) + pw, yy * scale); ctx.stroke();
+  });
+
+  // 5 the cutout on a checkerboard
+  const cx = px(4);
+  const cut = new Image();
+  return new Promise(resolve => {
+    cut.onload = () => {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(cx, 0, pw, panelH); ctx.clip();
+      for (let y = 0; y < panelH; y += 10)
+        for (let x = 0; x < pw; x += 10) {
+          ctx.fillStyle = ((x / 10 + y / 10) % 2 === 0) ? "#ffffff" : "#d8d8e2";
+          ctx.fillRect(cx + x, y, 10, 10);
+        }
+      const cs = Math.min(pw / cut.width, panelH / cut.height);
+      ctx.drawImage(cut, cx + (pw - cut.width * cs) / 2, (panelH - cut.height * cs) / 2,
+                    cut.width * cs, cut.height * cs);
+      ctx.restore();
+      resolve(sheet);
+    };
+    cut.onerror = () => resolve(sheet);
+    cut.src = result.imagePng;
+  });
+}
+
+async function runCase(c, i) {
+  const box = document.createElement("div");
+  box.className = "case";
+  const name = c.file.split("/").pop().replace(/\.\w+$/, "") + "__" + c.mode;
+  box.innerHTML = "<h3>" + name + "</h3>";
+  casesEl.appendChild(box);
+
+  const entry = { name, file: c.file, mode: c.mode };
+  try {
+    const img = await GarmentEngine._internals.loadImage(c.file);
+    const t0 = performance.now();
+    const result = await Promise.race([
+      GarmentEngine.extract(img, { mode: c.mode, backend: c.backend || "auto", debug: true }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout 90s")), 90000))
+    ]);
+    entry.ms = Math.round(performance.now() - t0);
+    entry.backend = result.backend;
+    entry.metrics = result.metrics;
+    entry.resolvedMode = result.mode;
+    entry.category = result.category;
+    entry.color = result.color;
+    entry.fabric = result.fabric;
+    entry.pieces = result.pieces;
+    entry.chosenPiece = result.chosenPiece;
+    entry.warnings = result.warnings;
+    entry.bbox = { w: result.bbox.w, h: result.bbox.h, procW: result.bbox.procW, procH: result.bbox.procH };
+
+    const sheet = await buildSheet(img, result, 340);
+    box.appendChild(sheet);
+    const m = document.createElement("div");
+    m.className = "metrics";
+    m.textContent = JSON.stringify(entry, null, 1);
+    box.appendChild(m);
+    if (result.warnings.length) {
+      const wn = document.createElement("div");
+      wn.className = "warn";
+      wn.textContent = "⚠ " + result.warnings.join(" | ");
+      box.appendChild(wn);
+    }
+    await post("/save?name=" + encodeURIComponent(String(i).padStart(2, "0") + "_" + name + ".png"),
+               sheet.toDataURL("image/png"));
+  } catch (e) {
+    entry.error = e && e.message ? e.message : String(e);
+    const er = document.createElement("div");
+    er.className = "err";
+    er.textContent = "ERROR: " + entry.error;
+    box.appendChild(er);
+    console.error(name, e);
+  }
+  report.cases.push(entry);
+}
+
+(async function main() {
+  try {
+    setStatus("warming up engine…");
+    const wu = await Promise.race([
+      GarmentEngine.warmup(),
+      new Promise(r => setTimeout(() => r({ backend: "timeout" }), 120000))
+    ]);
+    report.engine = Object.assign({}, wu, GarmentEngine.status());
+    setStatus("engine backend: " + JSON.stringify(report.engine));
+
+    for (let i = 0; i < CASES.length; i++) {
+      setStatus("case " + (i + 1) + "/" + CASES.length + " — " + CASES[i].file + " [" + CASES[i].mode + "]");
+      await runCase(CASES[i], i);
+    }
+    setStatus("done — " + report.cases.length + " cases");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    setStatus("FATAL " + report.fatal);
+  }
+  report.finishedAt = new Date().toISOString();
+  await post("/report", JSON.stringify(report, null, 1));
+  document.title = "LAB DONE";
+})();
+</script>
+</body>
+</html>

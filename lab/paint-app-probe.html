@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Retouch brush in the real app</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1320px;height:920px;border:0;background:#fff}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const check = (name, pass, detail) => {
+  report.checks.push({ name, pass: !!pass, detail: detail === undefined ? "" : String(detail) });
+  say((pass ? "  ok  " : " FAIL ") + name + (detail === undefined ? "" : "  [" + detail + "]"));
+  flush();
+};
+
+/**
+ * Progress goes to /save, not /report: the lab server exits on the first
+ * /report, so posting the running total there would end the run at check one.
+ * /save wants base64, hence the encode.
+ */
+function flush() {
+  const json = JSON.stringify(report, null, 1);
+  post("/save?name=progress.json", btoa(unescape(encodeURIComponent(json))));
+}
+const mark = label => { report.lastMark = label; say("      · " + label); flush(); };
+
+/**
+ * Drives the retouch brush through the REAL app with real mouse events.
+ *
+ * The module test proves the mask arithmetic. This proves the parts only the
+ * app can get wrong: that the toolbar is wired, that a pointer lands where the
+ * user aimed, that a stroke is recorded once rather than twice, that Apply
+ * keeps the brushwork instead of isolating the photo again, and that what ends
+ * up in the closet is what was on screen.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    localStorage.removeItem("pp_slot_optout");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const doc = win.document;
+    const read = expr => win.eval(expr);
+
+    for (let i = 0; i < 80; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof openStudioModal === 'function'")) break;
+      await wait(250);
+    }
+    check("the paint module loaded", !!win.CutoutPaint);
+    check("the retouch toolbar is in the page", !!doc.getElementById("tool-paint-erase") &&
+          !!doc.getElementById("tool-paint-draw") && !!doc.getElementById("tool-paint-fill"));
+
+    // --- get a real isolation into the add-item flow
+    read("currentRawImageSrc = 'assets/navy_denim_jacket.jpg'");
+    await read("runExtractionPipeline")("assets/navy_denim_jacket.jpg", null, "Test Jacket", "jacket");
+    await wait(400);
+    const isolated = read("currentUploadedImage");
+    check("the photo isolated and produced a cutout",
+          !!isolated && isolated.indexOf("data:") === 0 && read("currentUploadedIsCutout") === true);
+    check("the working frame was kept for the brush",
+          !!read("currentWorkingLayer") && read("currentWorkingLayer.w") > 0,
+          read("currentWorkingLayer") ? read("currentWorkingLayer.w") + "x" + read("currentWorkingLayer.h") : "null");
+
+    // --- open the studio and arm the eraser
+    read("openStudioModal")();
+    for (let i = 0; i < 40 && !read("studioState.rawImage"); i++) await wait(150);
+    check("the studio opened with the photo loaded", !!read("studioState.rawImage"));
+
+    doc.getElementById("tool-paint-erase").click();
+    for (let i = 0; i < 40 && !read("studioState.paint"); i++) await wait(150);
+    check("clicking Erase armed a paint layer", !!read("studioState.paint"));
+    check("Erase is the active tool", read("studioState.tool") === "erase", read("studioState.tool"));
+    check("the wrapper switched to painting mode",
+          doc.getElementById("crop-canvas-wrapper").classList.contains("painting"));
+
+    const canvas = doc.getElementById("crop-canvas");
+    const wrapper = doc.getElementById("crop-canvas-wrapper");
+
+    /* Force the canvas to be drawn at a size that is NOT its backing size.
+       The mapping bug this guards against — dividing by studioState.scale
+       instead of the live rectangle — is invisible whenever the two happen to
+       agree, and in the default headless viewport they do (380x380 either way).
+       Squeezing the element makes the two disagree by a third, so a wrong
+       mapping puts the stroke visibly off and the check can actually fail. */
+    canvas.style.width = Math.round(canvas.width * 0.66) + "px";
+    canvas.style.height = Math.round(canvas.height * 0.66) + "px";
+    await wait(120);
+    let rect = canvas.getBoundingClientRect();
+    report.canvasBacking = canvas.width + "x" + canvas.height;
+    report.canvasDisplayed = Math.round(rect.width) + "x" + Math.round(rect.height);
+    check("the probe is testing a canvas whose display size differs from its backing store",
+          Math.abs(rect.width - canvas.width) > 1,
+          report.canvasBacking + " backing vs " + report.canvasDisplayed + " displayed");
+
+    /* A picture of what the editor actually shows.
+       The reported "why is it zooming in like that" was the paint layer being
+       drawn 2.2x too large over the photo, because the engine hands back its
+       cutout cropped to its bounding box AND magnified for output quality. If
+       the layer is placed correctly the garment in this shot sits exactly on
+       the garment in the photo underneath. */
+    {
+      const shot = doc.getElementById("crop-canvas");
+      const grab = document.createElement("canvas");
+      grab.width = shot.width; grab.height = shot.height;
+      grab.getContext("2d").drawImage(shot, 0, 0);
+      await post("/save?name=studio_canvas.png", grab.toDataURL("image/png"));
+      const layerAspect = read("studioState.paint.w") / read("studioState.paint.h");
+      const photoAspect = read("studioState.rawImage.naturalWidth") /
+                          read("studioState.rawImage.naturalHeight");
+      check("the paint frame matches the photo's aspect, so the two register",
+            Math.abs(layerAspect - photoAspect) < 0.02,
+            layerAspect.toFixed(3) + " vs " + photoAspect.toFixed(3));
+    }
+
+    const at = (fx, fy) => ({
+      clientX: rect.left + fx * rect.width,
+      clientY: rect.top + fy * rect.height,
+      bubbles: true
+    });
+    const fire = (type, fx, fy) => wrapper.dispatchEvent(new win.MouseEvent(type, at(fx, fy)));
+
+    // --- one stroke across the middle of the jacket
+    fire("mousedown", 0.45, 0.45);
+    fire("mousemove", 0.50, 0.45);
+    fire("mousemove", 0.55, 0.45);
+    fire("mouseup", 0.55, 0.45);
+    await wait(250);
+    check("one drag recorded exactly one stroke", read("studioState.paint.strokes.length") === 1,
+          read("studioState.paint.strokes.length"));
+
+    // --- the stroke landed where it was aimed
+    const strokeMid = read("studioState.paint.strokes[0].pts[0]");
+    const expectX = 0.45 * read("studioState.paint.w");
+    check("the stroke landed where the pointer was, not where the scale factor said",
+          Math.abs(strokeMid[0] - expectX) < read("studioState.paint.w") * 0.02,
+          "got " + Math.round(strokeMid[0]) + ", expected ~" + Math.round(expectX));
+
+    // --- and it actually removed fabric there
+    const layerW = read("studioState.paint.w");
+    const probeIdx = Math.round(0.45 * read("studioState.paint.h")) * layerW + Math.round(0.50 * layerW);
+    const baseA = read("studioState.paint.baseAlpha")[probeIdx];
+    const nowA = win.CutoutPaint.render(read("studioState.paint")).alpha[probeIdx];
+    check("erasing made that pixel transparent", baseA > 0.5 && nowA < 0.5,
+          "base " + baseA.toFixed(2) + " -> " + nowA.toFixed(2));
+
+    // --- undo
+    doc.getElementById("tool-paint-undo").click();
+    await wait(200);
+    check("Undo removed the stroke", read("studioState.paint.strokes.length") === 0,
+          read("studioState.paint.strokes.length"));
+
+    // --- a press out in the letterbox gutter must not paint
+    rect = canvas.getBoundingClientRect();
+    const wrapRect = wrapper.getBoundingClientRect();
+    if (wrapRect.width - rect.width > 20) {
+      wrapper.dispatchEvent(new win.MouseEvent("mousedown",
+        { clientX: wrapRect.left + 4, clientY: wrapRect.top + wrapRect.height / 2, bubbles: true }));
+      wrapper.dispatchEvent(new win.MouseEvent("mouseup",
+        { clientX: wrapRect.left + 4, clientY: wrapRect.top + wrapRect.height / 2, bubbles: true }));
+      await wait(150);
+      check("a press in the empty gutter paints nothing",
+            read("studioState.paint.strokes.length") === 0, read("studioState.paint.strokes.length"));
+    } else {
+      check("a press in the empty gutter paints nothing", true, "no gutter in this layout, skipped");
+    }
+
+    // --- a stroke released outside the wrapper must still end
+    fire("mousedown", 0.40, 0.60);
+    fire("mousemove", 0.46, 0.60);
+    win.dispatchEvent(new win.MouseEvent("mouseup", { clientX: 5, clientY: 5, bubbles: true }));
+    await wait(200);
+    check("a stroke released off the canvas still ends",
+          read("studioState.paint.stroking") === false && read("studioState.paint.strokes.length") === 1,
+          read("studioState.paint.strokes.length") + " strokes, stroking=" + read("studioState.paint.stroking"));
+    // and the brush must not still be down on a bare hover
+    fire("mousemove", 0.70, 0.70);
+    await wait(120);
+    check("a bare hover after that paints nothing more",
+          read("studioState.paint.strokes.length") === 1, read("studioState.paint.strokes.length"));
+
+    // --- a drag that ends over the modal surround must not close the studio
+    const modal = doc.getElementById("crop-modal");
+    fire("mousedown", 0.5, 0.5);
+    fire("mousemove", 0.6, 0.5);
+    modal.dispatchEvent(new win.MouseEvent("mouseup", { clientX: 2, clientY: 2, bubbles: true }));
+    modal.dispatchEvent(new win.MouseEvent("click", { clientX: 2, clientY: 2, bubbles: true }));
+    await wait(200);
+    check("a stroke released over the modal surround does not close the studio",
+          modal.style.display !== "none" && !!read("studioState.paint"),
+          modal.style.display);
+
+    // --- Fill In on a hole we just erased
+    const beforeFill = read("studioState.paint.strokes.length");
+    doc.getElementById("tool-paint-fill").click();
+    for (let i = 0; i < 30 && read("studioState.tool") !== "fill"; i++) await wait(120);
+    check("Fill In became the active tool", read("studioState.tool") === "fill", read("studioState.tool"));
+    mark("fill: about to press");
+    fire("mousedown", 0.45, 0.45);
+    mark("fill: pressed");
+    fire("mousemove", 0.55, 0.45);
+    mark("fill: dragged");
+    fire("mouseup", 0.55, 0.45);
+    mark("fill: released");
+    await wait(500);
+    check("Fill In recorded a stroke",
+          read("studioState.paint.strokes.length") === beforeFill + 1,
+          read("studioState.paint.strokes.length"));
+
+    // --- Apply keeps the brushwork instead of isolating again
+    const beforeApply = read("currentUploadedImage");
+    const strokeCount = read("studioState.paint.strokes.length");
+    doc.getElementById("btn-crop-apply").click();
+    await wait(900);
+    const afterApply = read("currentUploadedImage");
+    check("Apply changed the stored cutout", afterApply !== beforeApply);
+    check("Apply did not re-isolate and discard the brushwork",
+          read("studioState.paint") === null && afterApply.indexOf("data:") === 0,
+          "paint=" + read("studioState.paint"));
+    check("the committed image is still tagged as isolated",
+          read("currentUploadedIsCutout") === true);
+    report.strokesCommitted = strokeCount;
+
+    // --- and it survives into the closet and onto the mannequin
+    doc.getElementById("item-name").value = "Retouched Jacket";
+    doc.getElementById("item-category").value = "jackets";
+    read("saveUploadedItem")();
+    await wait(400);
+    const saved = read("wardrobe").find(i => i.name === "Retouched Jacket");
+    check("the retouched garment saved to the closet", !!saved);
+    check("the saved garment is tagged isolated", saved && saved.isolated === true,
+          saved ? String(saved.isolated) : "n/a");
+    check("the saved image is the committed one", saved && saved.image === afterApply);
+
+    if (saved) {
+      const activeOutfit = read("activeOutfit");
+      for (const cat of Object.keys(activeOutfit.slots)) {
+        activeOutfit.slots[cat].itemId = null;
+        activeOutfit.slots[cat].enabled = false;
+      }
+      const top = read("wardrobe").find(i => i.category === "tops" && i.image);
+      const bottom = read("wardrobe").find(i => i.category === "bottoms" && i.image);
+      activeOutfit.slots.jackets.itemId = saved.id; activeOutfit.slots.jackets.enabled = true;
+      if (top) { activeOutfit.slots.tops.itemId = top.id; activeOutfit.slots.tops.enabled = true; }
+      if (bottom) { activeOutfit.slots.bottoms.itemId = bottom.id; activeOutfit.slots.bottoms.enabled = true; }
+      const ok = await read("renderOutfitDisplay")();
+      await wait(400);
+      check("the mannequin renders wearing the retouched garment", ok === true, String(ok));
+      const shot = doc.getElementById("mannequin-render").src;
+      if (shot && shot.indexOf("data:") === 0) await post("/save?name=paint_app_mannequin.png", shot);
+      check("the mannequin produced an image", !!shot && shot.indexOf("data:") === 0);
+    }
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

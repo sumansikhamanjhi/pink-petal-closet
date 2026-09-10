@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLM extract (remaining)</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:10px}pre{white-space:pre-wrap}</style></head>
+<body><pre id="log">running…</pre>
+<script src="../garment-engine.js"></script>
+<script src="../vlm-service.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const CASES = ["../assets/white_ribbed_top.jpg","../assets/floral_white_dress.jpg","../assets/black_ankle_boots.jpg"];
+const load = src => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+(async function () {
+  const report = { cases: [] };
+  const say = () => { document.getElementById("log").textContent = JSON.stringify(report, null, 1); };
+  try {
+    await GarmentEngine.warmup();
+    const W = 320, H = 340;
+    const sheet = document.createElement("canvas");
+    sheet.width = 2 * W + 8; sheet.height = CASES.length * (H + 6);
+    const sc = sheet.getContext("2d");
+    sc.fillStyle = "#101018"; sc.fillRect(0, 0, sheet.width, sheet.height);
+    for (let i = 0; i < CASES.length; i++) {
+      const entry = { file: CASES[i].split("/").pop() };
+      try {
+        const img = await load(CASES[i]);
+        const a = await VlmService.analyzeGarment(img);
+        entry.label = a.label; entry.category = a.category; entry.onBody = a.onBody;
+        let res;
+        if (a.onBody) {
+          const hint = { x: a.region.x + a.region.w / 2, y: a.region.y + a.region.h / 2 };
+          res = await GarmentEngine.extract(img, { mode: a.category === "dresses" ? "dress" : "auto", hintPoint: hint });
+          entry.path = "person+hint";
+        } else {
+          res = await GarmentEngine.extractObject(img, { region: a.region, category: a.category });
+          entry.path = "box-guided";
+          entry.boxFill = res.metrics.boxFill;
+        }
+        entry.quality = res.metrics.quality; entry.bbox = res.bbox.w + "x" + res.bbox.h;
+        entry.warnings = res.warnings;
+        const y = i * (H + 6);
+        let s = Math.min(W / img.width, H / img.height);
+        sc.drawImage(img, (W - img.width * s) / 2, y, img.width * s, img.height * s);
+        const cut = await load(res.imagePng);
+        for (let yy = 0; yy < H; yy += 10) for (let xx = 0; xx < W; xx += 10) {
+          sc.fillStyle = ((xx / 10 + yy / 10) % 2 === 0) ? "#fff" : "#d6d6de";
+          sc.fillRect(W + 8 + xx, y + yy, 10, 10);
+        }
+        s = Math.min(W / cut.width, H / cut.height);
+        sc.drawImage(cut, W + 8 + (W - cut.width * s) / 2, y + (H - cut.height * s) / 2, cut.width * s, cut.height * s);
+        sc.fillStyle = "#fff"; sc.font = "12px monospace";
+        sc.fillText(entry.file + " " + entry.path, 4, y + 12);
+      } catch (e) { entry.error = String(e && e.message || e); }
+      report.cases.push(entry); say();
+      await new Promise(r => setTimeout(r, 8000));   // stay inside the free-tier rate limit
+    }
+    await post("/save?name=vlm_extract2.png", sheet.toDataURL("image/png"));
+  } catch (e) { report.fatal = String(e && e.stack || e); }
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script></body></html>

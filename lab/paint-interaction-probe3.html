@@ -1,0 +1,95 @@
+<!doctype html><meta charset="utf-8"><title>paint interaction probe 3</title>
+<style>html,body{margin:0;overflow:hidden}#f{border:0;height:100vh;width:1280px}</style>
+<iframe id="f" src="../index.html"></iframe>
+<script>
+const R = { steps: [] };
+const log = (k,v)=>{ R[k]=v; R.steps.push(k+" = "+JSON.stringify(v)); };
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+async function waitFor(fn, ms){ ms=ms||15000; const t=Date.now(); while(Date.now()-t<ms){ try{ if(fn()) return true; }catch(e){} await sleep(60);} return false; }
+function makeImg(w,h){
+  const c=document.createElement("canvas"); c.width=w; c.height=h;
+  const x=c.getContext("2d"); x.fillStyle="#eee"; x.fillRect(0,0,w,h);
+  x.fillStyle="#234"; x.fillRect(w*0.3,h*0.2,w*0.4,h*0.5);
+  return c.toDataURL("image/png");
+}
+(async function(){
+ try {
+  const f = document.getElementById("f");
+  await new Promise(function(r){ f.onload = r; });
+  const win = f.contentWindow, doc = f.contentDocument;
+  await waitFor(function(){ return typeof win.openStudioModal === "function"; }, 20000);
+
+  // 1. addEventListener on the wrapper accumulates one copy per modal open,
+  //    because setupStudioCanvasEvents only REPLACES the on* properties.
+  const wrap = doc.getElementById("crop-canvas-wrapper");
+  let brushDowns = 0;
+  wrap.addEventListener("mousedown", function(){ brushDowns++; });
+  const srcs = [makeImg(700,1600), makeImg(720,1600), makeImg(740,1600)];
+  for (let i=0;i<3;i++){
+    win.eval("currentRawImageSrc = " + JSON.stringify(srcs[i]) + ";");
+    win.openStudioModal();
+    await sleep(500);
+    win.closeStudioModal();
+  }
+  const c = doc.getElementById("crop-canvas").getBoundingClientRect();
+  wrap.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c.left+5,clientY:c.top+5,bubbles:true}));
+  await sleep(50);
+  log("addEventListener_firesOncePerDown_afterThreeOpens", brushDowns);
+  log("note", "1 = listeners do NOT accumulate for a listener added ONCE; the hazard is adding it inside openStudioModal/onload");
+
+  // now the realistic mistake: add the listener from inside the open path, 3 opens
+  let acc = 0;
+  const addFromOpen = function(){ wrap.addEventListener("mousedown", function(){ acc++; }); };
+  for (let i=0;i<3;i++){ addFromOpen(); }
+  wrap.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c.left+6,clientY:c.top+6,bubbles:true}));
+  await sleep(50);
+  log("addEventListener_addedThreeTimes_firesPerDown", acc);
+
+  // 2. is setupStudioCanvasEvents really re-run per open? count reassignments
+  win.eval("window.__setupCount = 0; var _o = setupStudioCanvasEvents; setupStudioCanvasEvents = function(a,b){ window.__setupCount++; return _o(a,b); };");
+  for (let i=0;i<2;i++){
+    win.eval("currentRawImageSrc = " + JSON.stringify(makeImg(660+i*10,1500)) + ";");
+    win.openStudioModal(); await sleep(500); win.closeStudioModal();
+  }
+  log("setupStudioCanvasEvents_callsPerTwoOpens", win.eval("window.__setupCount"));
+
+  // 3. broken image src: does anything reinitialise? is the modal left interactive?
+  win.eval("currentRawImageSrc = " + JSON.stringify(makeImg(500,1400)) + ";");
+  win.openStudioModal(); await waitFor(function(){ return doc.getElementById("crop-canvas").width === 135; }, 6000);
+  const goodDims = [doc.getElementById("crop-canvas").width, doc.getElementById("crop-canvas").height];
+  const goodScale = win.eval("studioState.scale");
+  win.closeStudioModal();
+  win.eval("currentRawImageSrc = 'data:image/png;base64,NOTAVALIDIMAGE';");
+  win.openStudioModal();
+  await sleep(900);
+  log("brokenSrc_modalDisplay", doc.getElementById("crop-modal").style.display);
+  log("brokenSrc_canvasDimsStillOldPhoto", { now:[doc.getElementById("crop-canvas").width, doc.getElementById("crop-canvas").height], previous: goodDims });
+  log("brokenSrc_scaleStillOldPhoto", { now: win.eval("studioState.scale"), previous: goodScale });
+  // are the OLD handlers still live and writing state against the old scale?
+  const c3 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  win.eval("studioState.box = null;");
+  wrap.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c3.left+4,clientY:c3.top+4,bubbles:true}));
+  wrap.dispatchEvent(new win.MouseEvent("mousemove",{clientX:c3.left+60,clientY:c3.top+90,bubbles:true}));
+  wrap.dispatchEvent(new win.MouseEvent("mouseup",{clientX:c3.left+60,clientY:c3.top+90,bubbles:true}));
+  await sleep(60);
+  log("brokenSrc_dragStillWritesBox", win.eval("JSON.stringify(studioState.box)"));
+
+  // 4. the stuck-flag reopen: mousedown, close with NO mouseup, reopen, hover only
+  win.eval("currentRawImageSrc = " + JSON.stringify(makeImg(700,1600)) + ";");
+  win.openStudioModal(); await waitFor(function(){ return doc.getElementById("crop-canvas").width === 166; }, 6000);
+  const c4 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  wrap.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c4.left+20,clientY:c4.top+20,bubbles:true}));
+  win.closeStudioModal();                       // no mouseup at all
+  log("stuck_isDraggingAfterClose", win.eval("studioState.isDragging"));
+  win.openStudioModal(); await sleep(500);
+  win.eval("studioState.box = null;");
+  const c5 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  // pure hover, button never pressed
+  wrap.dispatchEvent(new win.MouseEvent("mousemove",{clientX:c5.left+120,clientY:c5.top+200,bubbles:true}));
+  await sleep(60);
+  log("stuck_phantomBoxFromHoverAlone", win.eval("JSON.stringify(studioState.box)"));
+  log("stuck_phantomCropBoxDisplay", doc.getElementById("crop-box").style.display);
+ } catch (err) { R.fatal = String(err && err.stack || err); }
+ await fetch("/report", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(R,null,2) });
+})();
+</script>

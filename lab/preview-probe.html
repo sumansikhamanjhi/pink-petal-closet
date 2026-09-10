@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Flat preview + no lookbook</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+iframe{width:1340px;height:940px;border:0;background:#fff;opacity:0.22}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<iframe id="app"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * Two changes, checked against the real app:
+ *
+ *   1. the lookbook is gone — no button, no mode, and nothing left that could
+ *      put a stranger's outfit on the mannequin
+ *   2. the mannequin shows the chosen garments AS PHOTOGRAPHED. The test that
+ *      matters is not "does it draw" but "is the shape untouched": every row
+ *      factor must be exactly 1, and the aspect ratio of what lands on the
+ *      canvas must match the cutout it came from.
+ */
+(async function () {
+  try {
+    const frame = document.getElementById("app");
+    frame.src = "../index.html";
+    await new Promise(r => { frame.onload = r; });
+    const win = frame.contentWindow;
+    const doc = win.document;
+    const read = e => win.eval(e);
+    for (let i = 0; i < 100; i++) {
+      if (read("typeof wardrobe !== 'undefined' && wardrobe.length > 0 && typeof renderOutfitDisplay === 'function'")) break;
+      await wait(250);
+    }
+
+    /* ---- 1. the lookbook is gone -------------------------------------- */
+    check("no lookbook button in the page",
+          doc.querySelectorAll("[data-mannequin-mode]").length === 0,
+          doc.querySelectorAll("[data-mannequin-mode]").length + " mode buttons");
+    check("no mode-switch container left behind", !doc.getElementById("mannequin-mode"));
+    for (const gone of ["MANNEQUIN_LOOKBOOK", "pickLookbookPhoto", "setMannequinMode", "mannequinMode"]) {
+      check("`" + gone + "` no longer exists", read("typeof " + gone) === "undefined");
+    }
+
+    /* ---- 2. the render button ----------------------------------------- */
+    const btn = doc.getElementById("btn-ai-tryon");
+    // named for what the wearer gets, not for what the code does — and with no
+    // "auto" beside it, because rendering every new look costs money per look
+    check("the render button is called 'See It Worn'",
+          btn && /See It Worn/.test(btn.textContent) && !/Render Outfit/.test(btn.textContent),
+          btn && JSON.stringify(btn.textContent.trim()));
+    check("and there is no auto checkbox next to it",
+          !doc.getElementById("chk-ai-auto"));
+    /* initTryOnControls awaits a status fetch, so the button settles a beat
+       after the wardrobe is up — poll rather than race it. It used to live in
+       its own #tryon-bar; it now sits in the row it shares with Save This
+       Look, so the button itself is what gets watched. */
+    for (let i = 0; i < 40; i++) {
+      if (win.getComputedStyle(btn).display !== "none") break;
+      await wait(100);
+    }
+    check("the render button is visible even with no server",
+          win.getComputedStyle(btn).display !== "none",
+          win.getComputedStyle(btn).display + ", disabled=" + btn.disabled +
+          ", says: " + doc.getElementById("tryon-status").textContent);
+    check("and it shares one row with Save This Look",
+          !!btn.closest(".look-actions-bar") &&
+          !!btn.closest(".look-actions-bar").querySelector("#btn-save-outfit"));
+
+    /* ---- 3. nothing is reshaped --------------------------------------- */
+    // pick a real garment and fit it both ways, so the difference is measured
+    // rather than assumed
+    const item = read("wardrobe").find(i => i.category === "dresses" && i.image);
+    check("there is a dress to measure", !!item, item && item.name);
+    const cut = await win.GarmentCutout.extract(item.image, { category: item.category });
+    const frame2 = { frameWidth: 512, frameHeight: 917 };
+
+    const shaped = win.GarmentFit.fit(cut, item.category, frame2);
+    const flat = win.GarmentFit.fit(cut, item.category,
+      Object.assign({ reshape: false }, frame2));
+
+    check("reshaping still does something when asked for",
+          shaped.warp.max - shaped.warp.min > 0.02,
+          "warp " + shaped.warp.min + "…" + shaped.warp.max);
+    check("reshape:false leaves every row at scale 1",
+          flat.warp.min === 1 && flat.warp.max === 1 && flat.warp.mean === 1,
+          "warp " + flat.warp.min + "…" + flat.warp.max);
+    check("reshape:false does not rotate the garment either",
+          flat.straightened.applied === false, flat.straightened.why);
+    report.warp = { shaped: shaped.warp, flat: flat.warp };
+
+    /* the real question: does the drawn garment keep its own proportions? */
+    const spanOf = (fitted) => {
+      const w = fitted.canvas.width, h = fitted.canvas.height;
+      const d = fitted.canvas.getContext("2d").getImageData(0, 0, w, h).data;
+      let x0 = w, x1 = -1, y0 = h, y1 = -1;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        if (d[(y * w + x) * 4 + 3] < 8) continue;
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+      return { w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    };
+    const srcAspect = cut.width / cut.height;
+    const flatBox = spanOf(flat), shapedBox = spanOf(shaped);
+    const flatAspect = flatBox.w / flatBox.h;
+    const shapedAspect = shapedBox.w / shapedBox.h;
+    report.aspect = { source: +srcAspect.toFixed(4), flat: +flatAspect.toFixed(4),
+                      shaped: +shapedAspect.toFixed(4) };
+    check("the flat render keeps the photograph's own aspect ratio",
+          Math.abs(flatAspect - srcAspect) / srcAspect < 0.02,
+          "source " + srcAspect.toFixed(3) + " vs flat " + flatAspect.toFixed(3));
+
+    /* ---- 4. the whole outfit, composed flat --------------------------- */
+    const base = await new Promise((res, rej) => {
+      const im = new win.Image(); im.onload = () => res(im); im.onerror = rej;
+      im.src = "../assets/mannequin_base.jpg";
+    });
+    const items = [];
+    for (const nm of ["Floral Summer Dress"]) {
+      const it = read("wardrobe").find(i => i.name === nm);
+      if (it) items.push({ category: it.category, cutout: cut });
+    }
+    const composed = await win.OutfitCompose.render(base, items,
+      { frameWidth: 512, reshape: false });
+    check("composing with reshape:false warps nothing",
+          composed.layers.every(l => l.warp.min === 1 && l.warp.max === 1),
+          composed.layers.map(l => l.category + " " + l.warp.min + "-" + l.warp.max).join(", "));
+    check("and bridges nothing", composed.bridged.length === 0,
+          composed.bridged.length + " bridges");
+
+    /* ---- 5. the app's own mannequin ----------------------------------- */
+    const activeOutfit = read("activeOutfit");
+    for (const c of Object.keys(activeOutfit.slots)) { activeOutfit.slots[c].itemId = null; activeOutfit.slots[c].enabled = false; }
+    const top = read("wardrobe").find(i => i.category === "tops" && i.image);
+    const bottom = read("wardrobe").find(i => i.category === "bottoms" && i.image);
+    activeOutfit.slots.tops.itemId = top.id; activeOutfit.slots.tops.enabled = true;
+    activeOutfit.slots.bottoms.itemId = bottom.id; activeOutfit.slots.bottoms.enabled = true;
+    const ok = await read("renderOutfitDisplay")();
+    await wait(400);
+    check("the app draws the chosen pieces", ok === true, String(ok));
+    const caption = doc.getElementById("mannequin-caption").textContent;
+    report.caption = caption;
+    check("the caption says what is shown and how to see it worn",
+          /as you photographed them/.test(caption) && /See It Worn/.test(caption), caption);
+    const shot = doc.getElementById("mannequin-render").src;
+    if (shot && shot.indexOf("data:") === 0) await post("/save?name=preview_flat.png", shot);
+
+    /* THE MANNEQUIN MUST BE GONE FROM THIS VIEW.
+       Checked in pixels, not by reading the code: the board's background is
+       pure white, and every mannequin asset in this project is a photograph of
+       a shop with a grey floor and grey walls. So if the corners of what is on
+       screen are white, no mannequin is in it — and no amount of refactoring
+       can quietly put one back without this failing. */
+    const probeImg = await new Promise((res, rej) => {
+      const im = new win.Image(); im.onload = () => res(im); im.onerror = rej; im.src = shot;
+    });
+    const pc = win.document.createElement("canvas");
+    pc.width = probeImg.naturalWidth; pc.height = probeImg.naturalHeight;
+    const pctx = pc.getContext("2d");
+    pctx.drawImage(probeImg, 0, 0);
+    const samples = [[2, 2], [pc.width - 3, 2], [2, pc.height - 3], [pc.width - 3, pc.height - 3]]
+      .map(([x, y]) => pctx.getImageData(x, y, 1, 1).data)
+      .map(d => d[0] + "/" + d[1] + "/" + d[2]);
+    report.corners = samples;
+    report.boardSize = pc.width + "x" + pc.height;
+    check("the picture is white to its corners — there is no mannequin in it",
+          samples.every(s => s === "255/255/255"), samples.join(" "));
+    check("and the board is only as tall as the look needs",
+          pc.height < 1144, report.boardSize);
+
+    /* ---- 5b. the occlusion fact has to survive the trip into the app ---
+       The engine measures it, the app has to carry it to the saved item, and
+       the render recommendation reads it back off the item. Each of those is
+       checked elsewhere; what is checked here is the seam between the first
+       two, which no unit test can see: extractGarment must put `occluded` on
+       the object the upload form is built from. Driven with a real on-body
+       photograph, because that is the only kind that has a bite in it. */
+    // path is resolved by the app in the iframe, whose base is the project root
+    const shotOfWorn = "lab/testset/dress_dark_runway.jpg";
+    const extracted = await read("extractGarment")(shotOfWorn, { targetMode: "dress" });
+    report.uploadOccluded = extracted.occluded;
+    report.uploadQuality = extracted.quality;
+    check("extractGarment reports how much of the garment was hidden",
+          typeof extracted.occluded === "number", JSON.stringify(extracted.occluded));
+    check("and on a photo with an arm across it, that is more than nothing",
+          extracted.occluded > 0.01, extracted.occluded);
+    check("saveUploadedItem stores it on the garment",
+          /newItem\.occluded/.test(read("saveUploadedItem").toString()));
+
+    /* ---- 6. an empty board shows an empty board ----------------------- */
+    for (const c of Object.keys(activeOutfit.slots)) { activeOutfit.slots[c].itemId = null; activeOutfit.slots[c].enabled = false; }
+    await read("updateMannequinRender")();
+    await wait(700);
+    const emptySrc = doc.getElementById("mannequin-render").src;
+    report.emptySrc = emptySrc.slice(0, 24);
+    check("an empty look gives a blank board, not a photograph of anything",
+          emptySrc.indexOf("data:") === 0 && !/mannequin_/.test(emptySrc),
+          emptySrc.slice(0, 24));
+    check("and says so",
+          /Pick some pieces/.test(doc.getElementById("mannequin-caption").textContent),
+          doc.getElementById("mannequin-caption").textContent);
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  await post("/report", JSON.stringify(report, null, 1));
+})();
+</script>
+</body></html>

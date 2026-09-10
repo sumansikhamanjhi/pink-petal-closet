@@ -1,0 +1,166 @@
+<!doctype html><meta charset="utf-8"><title>paint interaction probe 2</title>
+<style>html,body{margin:0;overflow:hidden}#f{border:0;height:100vh}</style>
+<iframe id="f" src="../index.html" style="width:1280px"></iframe>
+<script>
+const R = { steps: [] };
+const log = (k,v)=>{ R[k]=v; R.steps.push(k+" = "+JSON.stringify(v)); };
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+async function waitFor(fn, ms){ ms=ms||15000; const t=Date.now(); while(Date.now()-t<ms){ try{ if(fn()) return true; }catch(e){} await sleep(60);} return false; }
+
+function makeImg(w,h,label){
+  const c=document.createElement("canvas"); c.width=w; c.height=h;
+  const x=c.getContext("2d");
+  x.fillStyle="#f2f2f0"; x.fillRect(0,0,w,h);
+  x.fillStyle="#26364f"; x.fillRect(w*0.28,h*0.14,w*0.44,h*0.6);
+  x.fillStyle="#000"; x.font="bold 40px sans-serif"; x.fillText(label,10,50);
+  return c.toDataURL("image/png");
+}
+
+async function open(win, doc, src, expectW){
+  win.eval("currentRawImageSrc = " + JSON.stringify(src) + ";");
+  win.openStudioModal();
+  await waitFor(function(){ return doc.getElementById("crop-canvas").width === expectW; }, 8000);
+  await sleep(200);
+}
+
+function geom(win, doc){
+  const canvas = doc.getElementById("crop-canvas");
+  const wr = doc.getElementById("crop-canvas-wrapper").getBoundingClientRect();
+  const cr = canvas.getBoundingClientRect();
+  return {
+    innerW: win.innerWidth,
+    stageDir: win.getComputedStyle(doc.querySelector(".crop-studio-stage")).flexDirection,
+    bitmap: [canvas.width, canvas.height],
+    displayed: [+cr.width.toFixed(2), +cr.height.toFixed(2)],
+    cssRatioX: +(cr.width/canvas.width).toFixed(4),
+    offsetLeft: canvas.offsetLeft,
+    wrapperW: +wr.width.toFixed(2)
+  };
+}
+
+(async function(){
+ try {
+  const f = document.getElementById("f");
+  await new Promise(function(r){ f.onload = r; });
+  const win = f.contentWindow, doc = f.contentDocument;
+  await waitFor(function(){ return typeof win.openStudioModal === "function"; }, 20000);
+  log("probeWindow", [window.innerWidth, window.innerHeight]);
+
+  // === A. DESKTOP WIDTH (>=820px so the stage is a ROW and the panel takes 190px) ===
+  await open(win, doc, makeImg(1600,700,"LAND"), 580);
+  const g = geom(win, doc);
+  log("desktop1280_landscape", g);
+  // measured getCanvasPos vs truth for a dead-centre tap
+  const canvas = doc.getElementById("crop-canvas");
+  const wrapper = doc.getElementById("crop-canvas-wrapper");
+  const cr = canvas.getBoundingClientRect();
+  win.eval("studioState.hint = null;");
+  const cx = cr.left + cr.width/2, cy = cr.top + cr.height/2;
+  wrapper.dispatchEvent(new win.MouseEvent("mousedown",{clientX:cx,clientY:cy,bubbles:true}));
+  wrapper.dispatchEvent(new win.MouseEvent("mouseup",{clientX:cx,clientY:cy,bubbles:true}));
+  await sleep(60);
+  log("desktop_centreTap_hint", win.eval("JSON.stringify(studioState.hint)"));
+  log("desktop_centreTap_shouldBe", 0.5);
+  // and the drag box for a full-canvas drag
+  win.eval("studioState.box = null; studioState.hint=null;");
+  wrapper.dispatchEvent(new win.MouseEvent("mousedown",{clientX:cr.left+1,clientY:cr.top+1,bubbles:true}));
+  wrapper.dispatchEvent(new win.MouseEvent("mousemove",{clientX:cr.right-1,clientY:cr.bottom-1,bubbles:true}));
+  wrapper.dispatchEvent(new win.MouseEvent("mouseup",{clientX:cr.right-1,clientY:cr.bottom-1,bubbles:true}));
+  await sleep(60);
+  log("desktop_fullDrag_box", win.eval("JSON.stringify(studioState.box)"));
+  log("desktop_fullDrag_boxShouldBeAbout", {width:1600, height:700});
+
+  // portrait at desktop width for comparison
+  win.closeStudioModal();
+  await open(win, doc, makeImg(700,1600,"PORT"), 166);
+  log("desktop1280_portrait", geom(win, doc));
+
+  // === B. previewStudioSelection RACE: no generation guard ===
+  win.eval([
+    "window.__origExtract = window.GarmentEngine.extract;",
+    "window.__calls = [];",
+    "window.GarmentEngine.extract = function(src, opts){",
+    "  var tag = opts && opts.hintPoint ? ('hint@'+opts.hintPoint.x.toFixed(3)) : 'nohint';",
+    "  window.__calls.push(tag);",
+    "  var delay = window.__calls.length === 1 ? 900 : 60;",
+    "  return new Promise(function(res){ setTimeout(function(){ res({",
+    "    image: 'data:image/png;base64,' + tag,",
+    "    color: {name: tag}, mode: 'top', metrics: {quality: 88}",
+    "  }); }, delay); });",
+    "};"
+  ].join("\n"));
+  const wrap2 = doc.getElementById("crop-canvas-wrapper");
+  const c2 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  // tap A (slow, 900ms), then tap B (fast, 60ms)
+  const tap = (fx) => {
+    const x = c2.left + c2.width*fx, y = c2.top + c2.height*0.5;
+    wrap2.dispatchEvent(new win.MouseEvent("mousedown",{clientX:x,clientY:y,bubbles:true}));
+    wrap2.dispatchEvent(new win.MouseEvent("mouseup",{clientX:x,clientY:y,bubbles:true}));
+  };
+  tap(0.20); await sleep(80); tap(0.80);
+  await sleep(1400);
+  log("race_calls", win.eval("JSON.stringify(window.__calls)"));
+  log("race_finalHint", win.eval("JSON.stringify(studioState.hint)"));
+  log("race_previewImgSrcTail", doc.getElementById("studio-preview-img").src.split("base64,")[1] || "");
+  log("race_previewResultTail", win.eval("studioState.previewResult && studioState.previewResult.image").split("base64,")[1] || "");
+  log("race_statusText", doc.getElementById("studio-status").textContent);
+
+  // === C. preview resolving AFTER the modal has closed / a new photo loaded ===
+  win.eval("window.__calls = [];");
+  tap(0.35);
+  win.closeStudioModal();
+  win.eval("currentRawImageSrc = " + JSON.stringify(makeImg(300,300,"NEW")) + ";");
+  await sleep(1400);
+  log("staleWriteAfterClose_previewImgTail", doc.getElementById("studio-preview-img").src.split("base64,")[1] || "");
+  log("staleWriteAfterClose_status", doc.getElementById("studio-status").textContent);
+  win.eval("window.GarmentEngine.extract = window.__origExtract;");
+
+  // === D. a range-input drag released on the backdrop -> same close bug ===
+  // inject a slider into the toolbar to model the brush-size control
+  win.eval([
+    "var s = document.createElement('input'); s.type='range'; s.id='probe-range';",
+    "document.querySelector('.crop-preset-toolbar').appendChild(s);"
+  ].join(""));
+  await open(win, doc, makeImg(700,1600,"P4"), 166);
+  const modal = doc.getElementById("crop-modal");
+  const mr = modal.getBoundingClientRect();
+  const rng = doc.getElementById("probe-range").getBoundingClientRect();
+  rng && doc.getElementById("probe-range").dispatchEvent(new win.MouseEvent("mousedown",{clientX:rng.left+2,clientY:rng.top+2,bubbles:true}));
+  modal.dispatchEvent(new win.MouseEvent("mouseup",{clientX:mr.left+5,clientY:mr.bottom-5,bubbles:true}));
+  modal.dispatchEvent(new win.MouseEvent("click",{clientX:mr.left+5,clientY:mr.bottom-5,bubbles:true}));
+  await sleep(60);
+  log("sliderDragOffModal_closed", doc.getElementById("crop-modal").style.display);
+
+  // === E. setPointerCapture then a pointerup dispatched elsewhere: is it redirected? ===
+  await open(win, doc, makeImg(700,1600,"P5"), 166);
+  const wrap3 = doc.getElementById("crop-canvas-wrapper");
+  let up = 0; wrap3.onpointerup = function(){ up++; };
+  const c5 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  wrap3.dispatchEvent(new win.PointerEvent("pointerdown",{clientX:c5.left+5,clientY:c5.top+5,bubbles:true,pointerId:7,isPrimary:true}));
+  let capErr = "none";
+  try { wrap3.setPointerCapture(7); } catch(e){ capErr = e.name; }
+  log("capture_error", capErr);
+  log("capture_hasPointerCapture", wrap3.hasPointerCapture ? wrap3.hasPointerCapture(7) : "n/a");
+  // release "outside": dispatch pointerup on the side panel
+  doc.querySelector(".studio-selection-panel").dispatchEvent(new win.PointerEvent("pointerup",{clientX:0,clientY:0,bubbles:true,pointerId:7,isPrimary:true}));
+  await sleep(60);
+  log("capture_wrapperPointerupFired", up);
+  wrap3.onpointerup = null;
+
+  // === F. is #crop-box left visible when a preset is picked mid-drag? and the scrim ===
+  await open(win, doc, makeImg(700,1600,"P6"), 166);
+  const w6 = doc.getElementById("crop-canvas-wrapper");
+  const c6 = doc.getElementById("crop-canvas").getBoundingClientRect();
+  w6.dispatchEvent(new win.MouseEvent("mousedown",{clientX:c6.left+10,clientY:c6.top+10,bubbles:true}));
+  w6.dispatchEvent(new win.MouseEvent("mousemove",{clientX:c6.left+90,clientY:c6.top+150,bubbles:true}));
+  log("midDrag_cropBoxDisplay", doc.getElementById("crop-box").style.display);
+  log("midDrag_activePills", Array.from(doc.querySelectorAll(".btn-tool-pill.active")).map(function(b){return b.id;}));
+  // now simulate the user clicking a brush pill mid-drag (mouse still down)
+  log("midDrag_isDragging", win.eval("studioState.isDragging"));
+
+  // === G. how many .btn-tool-pill class clears happen on a plain mousedown ===
+  log("toolPillCount", doc.querySelectorAll(".btn-tool-pill").length);
+ } catch (err) { R.fatal = String(err && err.stack || err); }
+ await fetch("/report", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(R,null,2) });
+})();
+</script>

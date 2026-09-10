@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>fixtures</title></head><body>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b });
+const F = ["t1_tops","t3_tops","t6_tops","b1_bottoms","b3_bottoms","b2_bottoms",
+           "d1_dresses","d2_dresses","j1_jackets","f1_footwear","f2_footwear","bg1_bags"];
+(async function () {
+  const COLS = 4, W = 240, H = 260;
+  const cv = document.createElement("canvas");
+  cv.width = COLS * W; cv.height = Math.ceil(F.length / COLS) * H;
+  const c = cv.getContext("2d");
+  for (let y = 0; y < cv.height; y += 12) for (let x = 0; x < cv.width; x += 12) {
+    c.fillStyle = ((x/12 + y/12) % 2 === 0) ? "#fff" : "#d8d8e0";
+    c.fillRect(x, y, 12, 12);
+  }
+  for (let i = 0; i < F.length; i++) {
+    const img = new Image();
+    await new Promise(r => { img.onload = r; img.onerror = r; img.src = "fixtures/fixture_" + F[i] + ".png"; });
+    const col = i % COLS, row = Math.floor(i / COLS);
+    if (img.width) {
+      const s = Math.min(W / img.width, (H - 18) / img.height);
+      c.drawImage(img, col * W + (W - img.width * s) / 2, row * H + 16, img.width * s, img.height * s);
+    }
+    c.fillStyle = "#c0007a"; c.font = "bold 13px monospace";
+    c.fillText(F[i], col * W + 6, row * H + 13);
+  }
+  await post("/save?name=fixtures_sheet.png", cv.toDataURL("image/png"));
+  await post("/report", JSON.stringify({ n: F.length }));
+})();
+</script></body></html>

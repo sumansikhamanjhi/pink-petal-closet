@@ -1,0 +1,42 @@
+# Test-run output: logs, screenshots and reports, rewritten on every sweep.
+# The harness recreates all of it, so none of it belongs in history.
+lab/out/
+
+# Anything generated during a run rather than authored.
+lab/generated/
+
+# Credentials. There are none in the tree today and there should never be:
+# the API key is read from an environment variable, and on Cloud Run it is
+# injected from Secret Manager. See README.md.
+.env
+.env.*
+*.key
+*-key.json
+service-account*.json
+
+# An empty stray folder.
+Pink Petal Closet/
+
+# OS and editor noise.
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Node is not used to build or run this — there are no dependencies — but keep
+# this here so an accidental `npm install` cannot land in a commit.
+node_modules/
+package-lock.json
+
+# Working material, deliberately not shared as code:
+#
+#   form_answers.md   answers drafted for a submission form — private notes,
+#                     not part of the project.
+#   Pink_Petal_Closet_Documentation.md
+#                     the FIRST draft of the documentation. It describes a
+#                     pre-rendered "3D mannequin" feature that was removed, so
+#                     committing it would put a document in the repo that
+#                     contradicts the code. Documentation1.md is the current one.
+form_answers.md
+Pink_Petal_Closet_Documentation.md

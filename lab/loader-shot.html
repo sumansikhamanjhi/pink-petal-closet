@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>loader shots</title></head>
+<body><pre id="log">…</pre><iframe id="app" style="width:1400px;height:1000px;border:0;background:#fff"></iframe>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const wait = ms => new Promise(r => setTimeout(r, ms));
+/* Both loaders, held open, so the shapes can be looked at. Animation cannot be
+   judged from a still, but "is it a spinning ring or a garment" can. */
+(async function () {
+  const frame = document.getElementById("app");
+  frame.src = "../index.html";
+  await new Promise(r => { frame.onload = r; });
+  const win = frame.contentWindow, doc = win.document;
+  const read = e => win.eval(e);
+  for (let i = 0; i < 120; i++) {
+    if (read("typeof generateOutfit === 'function' && typeof wardrobe !== 'undefined' && wardrobe.length")) break;
+    await wait(250);
+  }
+  read("switchTab")("assistant");
+  await wait(1500);
+  const ml = doc.getElementById("mannequin-loading");
+  ml.style.display = "flex";
+  ml.classList.add("is-rendering");
+  read("startRenderNarration")(false);
+  await wait(900);
+  await post("/save?name=loader_render.txt", btoa(unescape(encodeURIComponent(
+    ml.textContent.trim() + " || sweep=" + !!ml.querySelector(".dress-loader-sweep") +
+    " track=" + !!ml.querySelector(".dress-loader-track span")))));
+  read("switchTab")("add");
+  await wait(600);
+  const dl = doc.getElementById("dropzone-loader");
+  dl.style.display = "block";
+  const prompt = doc.querySelector(".dropzone-prompt");
+  if (prompt) prompt.style.display = "none";
+  await wait(700);
+  await post("/save?name=loader_add.txt", btoa(unescape(encodeURIComponent(
+    dl.textContent.replace(/\s+/g, " ").trim() + " || line=" + !!dl.querySelector(".scan-loader-line") +
+    " dots=" + dl.querySelectorAll(".scan-loader-dots i").length))));
+  document.getElementById("log").textContent = "captured";
+  await post("/report", JSON.stringify({ ok: true }, null, 1));
+})();
+</script></body></html>
