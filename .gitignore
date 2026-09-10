@@ -40,3 +40,7 @@ package-lock.json
 #                     contradicts the code. Documentation1.md is the current one.
 form_answers.md
 Pink_Petal_Closet_Documentation.md
+
+# Generated from Pink_Petal_Closet_Documentation1.md by the md-to-docx script,
+# purely so Google Docs can import it. Not a source file.
+Pink_Petal_Closet_Documentation1.docx
