@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Does occlusion repair fire on real photos?</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px ui-monospace,monospace;padding:12px}
+pre{white-space:pre-wrap;color:#9fd}</style></head>
+<body>
+<pre id="log">running…</pre>
+<script src="../garment-engine.js"></script>
+<script>
+const SINK = "http://localhost:8123";
+const post = (u, b) => fetch(SINK + u, { method: "POST", body: b }).catch(e => console.warn(e));
+const report = { photos: [], checks: [] };
+const say = t => { document.getElementById("log").textContent += "\n" + t; };
+const flush = () => post("/save?name=progress.json",
+  btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+const check = (n, p, d) => {
+  report.checks.push({ name: n, pass: !!p, detail: d === undefined ? "" : String(d) });
+  say((p ? "  ok  " : " FAIL ") + n + (d === undefined ? "" : "  [" + d + "]"));
+  flush();
+};
+
+/**
+ * NOT a pass/fail probe. A measurement, run because the claim in the docs —
+ * "fabric hidden behind hair or a forearm is reconstructed" — was contradicted
+ * by the person using the app, and the existing occlusion probe measures
+ * fixtures rather than real photographs of people.
+ *
+ * For each real photo of a person wearing clothes, this reports what
+ * repairOccluderBites actually did: which notches it accepted, which it threw
+ * away and for what stated reason, and how many pixels it ended up painting.
+ * The answer decides whether the claim gets fixed in code or in the docs.
+ */
+const PHOTOS = [
+  "testset/dress_white_outdoor.jpg",
+  "testset/dress_dark_runway.jpg",
+  "testset/dress_long_1997.jpg",
+  "testset/casual_tshirt_jeans.jpg",
+  "testset/dress_red_runway.jpg"
+];
+
+const load = src => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error(src)); i.src = src;
+});
+
+(async function () {
+  try {
+    check("the engine exposes the bite repair", typeof GarmentEngine !== "undefined" &&
+          typeof GarmentEngine.extract === "function" && !!GarmentEngine._internals.repairOccluderBites);
+
+    let firedOn = 0, paintedTotal = 0;
+
+    for (const src of PHOTOS) {
+      let img;
+      try { img = await load(src); }
+      catch (e) { say("  (missing " + src + ")"); continue; }
+
+      const out = await GarmentEngine.extract(img, { fillOccluded: true, debug: true });
+      const d = (out && out._debug && out._debug.bites) || null;
+      const painted = d ? (d.count || 0) : 0;
+      const acc = d && d.accepted ? d.accepted : [];
+      const rej = d && d.rejected ? d.rejected : [];
+
+      const row = {
+        photo: src,
+        quality: out && out.quality,
+        occludedMetric: out && out.metrics && out.metrics.occluded,
+        paintedPx: painted,
+        radius: d && d.radius, floor: d && d.floor,
+        accepted: acc, rejected: rej
+      };
+      report.photos.push(row);
+      if (painted > 0) firedOn++;
+      paintedTotal += painted;
+
+      say("");
+      say("  " + src);
+      say("    quality " + (out && out.quality) + "   painted " + painted + " px" +
+          "   kernel r=" + (d && d.radius) + "  floor=" + (d && d.floor));
+      if (acc.length) {
+        for (const a of acc) {
+          say("    ACCEPTED  " + a.size + " px   occluder " + a.occluder +
+              "  roofed " + a.roofed + "  share " + a.share);
+        }
+      } else {
+        say("    ACCEPTED  none");
+      }
+      if (rej.length) {
+        for (const r of rej) say("    rejected  " + r.size + " px   " + r.why);
+      } else {
+        say("    rejected  none  (nothing was even a candidate)");
+      }
+      flush();
+    }
+
+    report.summary = {
+      photos: report.photos.length,
+      firedOn: firedOn,
+      paintedTotal: paintedTotal,
+      noCandidates: report.photos.filter(p => !p.accepted.length && !p.rejected.length).length,
+      rejectReasons: report.photos.reduce((m, p) => {
+        for (const r of p.rejected) {
+          const key = String(r.why).replace(/[:\s].*$/, "");
+          m[key] = (m[key] || 0) + 1;
+        }
+        return m;
+      }, {})
+    };
+
+    say("");
+    say("  ---- summary ----");
+    say("  photos of people tested:        " + report.summary.photos);
+    say("  photos where repair painted:    " + firedOn);
+    say("  photos with NO candidate notch: " + report.summary.noCandidates);
+    say("  total pixels painted:           " + paintedTotal);
+    say("  reasons notches were rejected:  " + JSON.stringify(report.summary.rejectReasons));
+
+    /* "Fires on a majority" was the first assertion here and it PASSED while
+       two of five photos got nothing at all and a third got 164 px — 0.7% of
+       the garment, invisible. Any painting at all counted as firing, so the
+       measure flattered the code and I nearly shipped the flattering number.
+       Judge a visible share instead. */
+    const MEANINGFUL = 0.01;   // 1% of garment area; below this nothing shows
+    const meaningful = report.photos.filter(p => (p.occludedMetric || 0) >= MEANINGFUL);
+    report.summary.meaningful = meaningful.length;
+
+    say("  meaningful repairs (>=1% of garment): " + meaningful.length +
+        " of " + report.summary.photos);
+
+    /* A regression guard pinned to what was actually measured, not to what the
+       feature was hoped to do. If a change improves this, raise the number
+       deliberately; if a change breaks it, this fails. */
+    check("repair still meaningfully fixes at least 2 of the 5 real photos",
+          meaningful.length >= 2,
+          meaningful.length + " of " + report.photos.length + ": " +
+          meaningful.map(p => p.photo.replace(/^testset\//, "") +
+                              " " + (p.occludedMetric * 100).toFixed(1) + "%").join(", "));
+
+    /* Whatever it declines, it must be able to say why — an unexplained
+       refusal is the thing that made this hard to reason about in the first
+       place. */
+    const unexplained = [];
+    for (const p of report.photos) {
+      for (const r of p.rejected) if (!r.why) unexplained.push(p.photo);
+    }
+    check("every notch it declines carries a stated reason",
+          unexplained.length === 0, unexplained.join(", ") || "all explained");
+
+    /* The documented limit, asserted so the docs and the code cannot drift:
+       notches open to the background are refused on purpose. */
+    const bgRefusals = report.photos.reduce((n, p) =>
+      n + p.rejected.filter(r => /mostly background/.test(r.why || "")).length, 0);
+    check("the open-to-the-background guard is doing the refusing, as documented",
+          bgRefusals > 0, bgRefusals + " notches refused for opening to the background");
+  } catch (e) {
+    report.fatal = String(e && e.stack || e);
+    say("FATAL " + report.fatal);
+  }
+  report.passed = report.checks.filter(c => c.pass).length;
+  report.failed = report.checks.filter(c => !c.pass).length;
+  say("\n" + report.passed + " passed, " + report.failed + " failed");
+  await post("/save?name=report.json",
+    btoa(unescape(encodeURIComponent(JSON.stringify(report, null, 1)))));
+  await post("/done", "occlusion-truth");
+})();
+</script>
+</body></html>

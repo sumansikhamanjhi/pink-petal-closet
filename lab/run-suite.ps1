@@ -25,6 +25,7 @@ param(
         "lab/apicore-probe.html",
         "lab/apicore-mutant.html",
         "lab/seed-probe.html",
+        "lab/occlusion-truth.html",
         "lab/aifit-probe.html",
         "lab/fidelity-probe.html",
         "lab/display-probe.html",

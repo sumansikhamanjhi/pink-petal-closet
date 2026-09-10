@@ -21,7 +21,7 @@ Three distinct pieces of work:
 
 | | |
 |---|---|
-| **Isolation** | A vision-language model decides *which* garment the photo is about and where it sits. MediaPipe selfie-multiclass separates clothing from body. A marker-based watershed handles the case colour thresholds cannot: a white garment on a white backdrop. Fabric hidden behind hair or a forearm is reconstructed from the surrounding weave. A Cutout Editor (tap-to-pick, drag-box, and Erase / Draw Back / Fill In brushes) covers what the automatic pass gets wrong. |
+| **Isolation** | A vision-language model decides *which* garment the photo is about and where it sits. MediaPipe selfie-multiclass separates clothing from body. A marker-based watershed handles the case colour thresholds cannot: a white garment on a white backdrop. Fabric hidden behind hair or a forearm is repaired when the gap is enclosed by fabric; a bite open to the outer edge of the silhouette is left alone, because it cannot be told apart from a real gap in the outfit. A Cutout Editor (tap-to-pick, drag-box, and Erase / Draw Back / Fill In brushes) covers what the automatic pass gets wrong. |
 | **Styling** | A typed occasion is sorted into one of fourteen buckets by whole-word match with a stated precedence order, then every garment is scored on tag fit and colour harmony. It chooses between a dress and separates by scoring the best dress against the best top-and-bottom pair. Slots can be locked, shuffled, or switched off. When it does not recognise a phrase, it says so. |
 | **Showing** | Before anything is spent, the look is a flat display of your real cutouts on white. Pressing See It Worn sends them and a bare mannequin to Gemini 2.5 Flash Image via Vertex AI. The result is checked against your own photo for colour and length drift and refused if the model changed the garment, then stored in IndexedDB against that exact set of garments so returning to a look is free and instant. |
 
@@ -85,7 +85,7 @@ lab/                              the validation harness
 .\lab\run-suite.ps1
 ```
 
-**456 assertions across 20 headless-browser suites**, exercising the real
+**460 assertions across 21 headless-browser suites**, exercising the real
 application rather than mocks: cutout quality on ten fixtures (three of them
 white-on-white), occlusion repair measured with the repair on *and* off, which
 isolation path each upload route reaches, what the AI prompts actually say,

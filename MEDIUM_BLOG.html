@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>The Amber Dress Problem</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; font-size: 20px; line-height: 1.6;
+         color: #242424; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 40px; line-height: 1.2; }
+  h2 { font-size: 28px; margin-top: 44px; }
+  h3 { font-size: 22px; margin-top: 32px; }
+  pre { background: #f6f6f6; padding: 14px; overflow-x: auto; font-size: 13px; line-height: 1.35;
+        font-family: 'Courier New', monospace; }
+  code { font-family: 'Courier New', monospace; font-size: 0.85em; background: #f2f2f2; }
+  pre code { background: none; font-size: inherit; }
+  blockquote { border-left: 3px solid #242424; margin-left: 0; padding-left: 18px; font-style: italic; }
+  hr { border: 0; border-top: 1px solid #e0e0e0; margin: 40px 0; }
+  a { color: #1a8917; }
+</style></head>
+<body>
+<h1>The Amber Dress Problem</h1>
+<h3>I built an AI wardrobe that cuts your clothes out of any photo and renders them worn on a mannequin. The hard part wasn't the AI — it was catching the AI when it lied.</h3>
+<hr>
+<p>I asked an image model to show me a yellow dress being worn.</p>
+<p>It gave me an amber one. Slightly deeper, slightly more orange — the kind of difference you would not notice unless the dress were yours. It was mine, in the sense that I had photographed it and put it in the app. So I noticed.</p>
+<p>The interesting part is <em>why</em> it happened, and it was not the model's fault. My own code had told it to make an amber dress. I'll come back to that.</p>
+<hr>
+<h2>The problem nobody has solved for you</h2>
+<p>Most people own more clothes than they can hold in their head. The consequences are boring and constant: the same three outfits on rotation, garments bought and never worn, and a decision every morning made against a wardrobe you cannot see all of at once.</p>
+<p>The existing answers all miss:</p>
+<ul>
+<li><strong>A photo album is not a wardrobe.</strong> You cannot ask it what goes together.</li>
+<li><strong>Retail try-on styles you in clothes you don't own.</strong> That's advertising, not help.</li>
+<li><strong>Every "digitise your closet" app</strong> starts with <em>photograph each garment against a plain white background</em>. Nobody does that. That instruction is where those apps die.</li>
+</ul>
+<p>So the real constraint is this: <strong>the input has to be the photos people already have.</strong> A screenshot from a shop. A flat lay on a bed. A picture of your friend wearing the thing at a party, with a lamp behind her and her hair over one shoulder.</p>
+<p>If you can solve <em>that</em>, you have a wardrobe. If you can't, you have a chore.</p>
+<hr>
+<h2>What I built</h2>
+<p><strong>Pink Petal Closet</strong> — <a href="https://pink-petal-closet-fl3nzijd2q-uc.a.run.app">live app</a> · <a href="https://github.com/sumansikhamanjhi/pink-petal-closet">source</a></p>
+<p>Give it any clothing photograph. It returns <strong>just that garment</strong>, cut out on transparency — background gone, model gone, hanger gone. Those cutouts become a browsable closet. Then you type where you are going, in plain words, and it assembles an outfit from your own clothes. Press one button and it returns a photograph of that outfit actually being worn.</p>
+<p>Three pieces of work, in order of difficulty:</p>
+<p><strong>1. Get the garment out.</strong> The hard one. Vision-language model, human parsing, watershed segmentation, occlusion repair.</p>
+<p><strong>2. Decide what to wear.</strong> Fourteen occasion buckets, tag scoring, colour harmony, dress-versus-separates.</p>
+<p><strong>3. Show it.</strong> A flat display for free; an AI render on demand, verified before it's trusted.</p>
+<hr>
+<h2>Architecture</h2>
+<p>Everything runs in the browser. The only server exists to hold the API key so the page can't leak it.</p>
+<pre><code>        ┌──────────── THE BROWSER ────────────┐
+        │  vanilla JS · no framework · no     │
+        │  bundler · no build step            │
+        │                                     │
+        │  app.js ── 9 standalone modules     │
+        │     │                               │
+        │     ├── garment-engine.js           │
+        │     │      MediaPipe parsing,       │
+        │     │      occlusion repair,        │
+        │     │      alpha matting            │
+        │     │                               │
+        │     ├── vlm-service.js              │
+        │     └── tryon-service.js            │
+        └──────────────┬──────────────────────┘
+                       │ /api/vlm  /api/tryon
+                       ▼
+        ┌─────────────────────────────────────┐
+        │  Cloud Run  (Node 22, 0 deps)       │
+        │  serves the app + holds the key     │
+        └──────────────┬──────────────────────┘
+                       ▼
+        ┌─────────────────────────────────────┐
+        │  Gemini API   → identify + tag      │
+        │  Vertex AI    → the worn render     │
+        │    gemini-2.5-flash-image           │
+        └─────────────────────────────────────┘
+
+  Persistence is entirely client-side:
+    localStorage  wardrobe, saved looks
+    IndexedDB     every paid render, uncapped
+    Cache API     the ML model</code></pre>
+<p>The Google Cloud stack: <strong>Vertex AI</strong>, <strong>Gemini API</strong>, <strong>Cloud Run</strong>, <strong>Cloud Build</strong>, <strong>Artifact Registry</strong>, <strong>Secret Manager</strong>, <strong>Cloud Storage</strong>, <strong>Cloud Logging</strong>, <strong>IAM</strong>.</p>
+<p>Two deliberate choices worth naming:</p>
+<p><strong>The server has zero npm dependencies.</strong> Node's standard library only. The build is a <code>COPY</code>. There is no lockfile to drift and no third-party code in the one process that holds the credential.</p>
+<p><strong>Renders need no key at all.</strong> On Cloud Run the container asks the metadata server for a token for its own service account. Nothing to paste, expire, or rotate. The API key that <em>does</em> exist lives in Secret Manager and arrives as an environment variable — never in the image, never in the repo, never in the page.</p>
+<hr>
+<h2>Implementation, step by step</h2>
+<h3>1. Ask the picture what it is</h3>
+<p>Before touching a pixel, a vision-language model answers two questions no pixel rule can: <em>which</em> garment is this photo about, and <em>where</em> is it?</p>
+<p>This matters more than it sounds. A photo of an outfit contains four garments. A shop screenshot contains a garment and a "Add to bag" button. Without this step you get a confident cutout of the wrong thing.</p>
+<h3>2. Separate clothing from body</h3>
+<p>MediaPipe's <code>selfie_multiclass_256x256</code> runs <strong>in the browser</strong>, in WASM, cached after first load. It labels every pixel: background, hair, skin, face, clothes, accessory.</p>
+<p>This is the single best decision in the project. Human parsing is the expensive part of the problem and it costs zero API calls, forever.</p>
+<h3>3. Flood from the backdrop, not the colour</h3>
+<p>Here is the case that kills colour-threshold approaches: <strong>a white top on a white sweep.</strong> There is no colour difference to threshold.</p>
+<p>So instead: marker-based watershed segmentation (Meyer's flooding) from the backdrop inward, with an MSER-style stability sweep over 16 candidate thresholds — pick the segmentation that changes least as you vary the threshold, because that's the one the image actually supports.</p>
+<p>Measured cutout quality: <strong>94–100</strong> on clean product shots, <strong>76–81</strong> on white-on-white. Not perfect. Previously unusable.</p>
+<h3>4. Put back some of what the hair was covering</h3>
+<p>A photo of someone wearing a dress has a bite missing where her hair falls over her shoulder. Nobody wants a dress with a bite in it.</p>
+<p>The approach: morphologically close the garment mask, look at each resulting <strong>notch</strong>, and ask whether an occluder is standing in it. Fill only those.</p>
+<p><strong>This works less often than I would like, and it's worth being precise about why</strong> — because the honest version is more interesting than the pitch.</p>
+<p>Closing only bridges a gap it can span, and it only finds notches that fabric <em>encloses</em>. So the repair handles a lock of hair lying across the middle of a chest, and does nothing at all for hair falling over the <strong>outer edge</strong> of a shoulder — because that notch opens to the background, and a notch open to the background is indistinguishable from a genuine gap in the outfit. The space between two trouser legs. The split of a wrap skirt. Those must not be painted in, and the guard that protects them is the same guard that refuses the hair.</p>
+<p>Measured on five real photographs of people:</p>
+<pre><code>dress_dark_runway     1388 px repaired   5.2% of the garment
+dress_long_1997       3924 px repaired   3.2%
+dress_red_runway       164 px repaired   0.7%   (invisible)
+dress_white_outdoor       0 px           nothing
+casual_tshirt_jeans       0 px           nothing
+
+why notches were thrown away:  6x "mostly background"
+                               2x "it's the garment's own neckline"
+                               1x "no occluder explains it"</code></pre>
+<p>Two out of five, meaningfully. I shipped it because a repaired bite is strictly better than a bitten one and the failure mode is "unchanged" rather than "wrong" — but the docs I first wrote said fabric behind hair "is reconstructed", full stop, and that was a claim my own measurements didn't support. Someone using the app told me so before I caught it myself, which is the least comfortable way to find out.</p>
+<p>The fix I <em>won't</em> ship without more evidence: loosening the open-to-the-background guard. It would catch the shoulder case and it would also start inventing fabric between trouser legs. Painting cloth that was never there is a worse failure than leaving a notch, so that guard stays until I can tell the two cases apart properly.</p>
+<h3>5. Matte the edge</h3>
+<p>Soft alpha at the boundary, plus colour decontamination — because a pixel that is 60% dress and 40% background carries background colour into your garment, and a hundred of those give the cutout a halo.</p>
+<h3>6. Score it, and admit when it's bad</h3>
+<p>Every cutout gets a quality number. A bad one is flagged rather than shipped silently. There's a <strong>Cutout Editor</strong> for the rest: tap the garment you want, drag a box, or fix the edge by hand with three brushes — <em>Erase</em>, <em>Draw Back</em> (restores the photograph's own pixels) and <em>Fill In</em> (invents fabric from the garment around the gap).</p>
+<h3>7. Read the occasion like a person would</h3>
+<p>You type "diwali dinner". The stylist sorts it into one of <strong>fourteen</strong> buckets — party, casual, work, date, edgy, beach, autumn, formal, active, cold, rain, travel, festive, sombre — then scores every garment on tag fit plus colour harmony against anything you've pinned.</p>
+<p>It picks between a dress and separates by scoring the best dress against the best top-and-bottom pair. And when it doesn't recognise a phrase, <strong>it says so</strong> instead of quietly returning something generic. An honest "I don't know this one" is worth more than a confident wrong answer.</p>
+<h3>8. Show the pieces before spending money</h3>
+<p>Before any render, the look appears as a <strong>flat display of your real cutouts</strong> laid out on white.</p>
+<p>This was originally a mannequin. I took it out, and it's one of my favourite decisions in the project. Placing a flat photograph on a body invites a comparison it cannot win — every place the fabric fails to follow the shoulder reads as a defect <em>in your garment</em>. A flat lay promises nothing about drape, so it can't break that promise.</p>
+<h3>9. Render — then check the render</h3>
+<p><code>gemini-2.5-flash-image</code> gets the cutouts and a bare mannequin, and returns a photograph of the outfit worn.</p>
+<p><strong>Then the result is verified against your own photo.</strong> Colour distance in CIE Lab; length as height over shoulder width. If the model changed your garment, the render is <em>refused</em> and your photo is kept. On a faithful render: <strong>ΔE 1.4</strong> and <strong>0.1% length drift</strong>, against thresholds of 12 and 20%.</p>
+<p>Every render that passes is stored in IndexedDB keyed to that exact set of garments. Returning to a look is instant and free. It's uncapped on purpose — localStorage's 5 MB forced eviction, which meant a render you had paid for could vanish because you'd rendered others since. Wrong behaviour for something bought.</p>
+<hr>
+<h2>Five bugs that taught me something</h2>
+<p>This is the part I'd actually want to read, so here it is.</p>
+<h3>The amber dress: I promoted a lossy label to ground truth</h3>
+<p>The render prompt said <em>"an amber dress"</em>. Because my code looked up the garment's stored colour <strong>name</strong> — and that name came from a coarse 20-bucket table where any saturated gold is "Amber".</p>
+<p>I had a perfectly good source of truth — the actual pixels I was about to send — and instead I sent a lossy human label derived from them. The model did exactly what I asked.</p>
+<p><strong>Fix:</strong> measure the mean colour from the cutout being transmitted and state it as sRGB. <strong>Lesson:</strong> when you have the data, don't send your summary of the data.</p>
+<h3>The blur that reached across the silhouette</h3>
+<p>Occlusion repair painted a black dress in <strong>mauve</strong>. The inpainting blur was sampling neighbours without checking whether they were inside the garment — 65% of each repaired pixel came from skin <em>outside</em> the cutout.</p>
+<p><strong>Fix:</strong> a weight-normalised blur confined to the filled region. Colour gap <strong>106 → 18</strong>; bright outliers <strong>175 → 1</strong>.</p>
+<p><strong>Lesson:</strong> a blur is an average, and an average over the wrong population is confidently wrong.</p>
+<h3>My test measured the wrong thing and passed</h3>
+<p>I wrote an "enclosure" check for occlusion notches. It reported 0.07–0.13 and I spent an hour tuning thresholds against it before realising the marked pixels were a <em>sliver inside</em> a much larger notch. The metric was meaningless.</p>
+<p>Worse: a probe once reported <strong>"8 passed, 0 failed"</strong> while having <em>aborted</em> part-way. A suite that throws records zero failures and a short count — which reads exactly like success.</p>
+<p><strong>Fix:</strong> the runner now treats an aborted probe as a failure. And when the server's core-logic suite passed 80/80 on its first run, I didn't celebrate — I wrote a <strong>mutation test</strong> that breaks that logic nine different ways in memory and requires each fault to be caught. All nine were.</p>
+<p><strong>Lesson:</strong> "it passed immediately" is evidence about your test, not only your code.</p>
+<h3>"chic" on 100% of garments</h3>
+<p>My tagger was mechanical, and it put <strong>chic</strong> on every single garment and <strong>boutique</strong> on 61% of them. Words in no occasion list and no real search, occupying two of five tag slots.</p>
+<p>Worse, it inferred fabric from colour: the colour describer returns "Smooth Twill" for anything black, so a silk camisole and leather boots were both tagged <code>twill</code>.</p>
+<p><strong>Fix:</strong> a vision model does tagging, handed the stylist's <em>own</em> vocabulary to choose from, with the filler words explicitly banned. The engine may now only contribute words it actually measured from texture. <code>chic</code>: 100% → <strong>0</strong>.</p>
+<h3>"gym workout" was an office outfit</h3>
+<p>The stylist matched keywords by substring. So <em>workout</em> contains <em>work</em> → office. And <em>travel</em> contains <em>rave</em> → "airport travel day" came back as a party outfit.</p>
+<p><strong>Fix:</strong> whole-word matching, plus an explicit precedence list rather than relying on declaration order. Bucket accuracy went <strong>17/22 → 22/22</strong>, with all 71 servable slots deterministic.</p>
+<p><strong>Lesson:</strong> substring matching on natural language is a bug with a delay fuse.</p>
+<hr>
+<h2>How it's tested</h2>
+<p><strong>460 assertions across 21 headless-Chrome suites</strong>, driving the real application rather than mocks. No node, no npm, no Jest — a PowerShell HTTP server plus headless Chrome, with each page POSTing its results back to disk.</p>
+<p>Highlights:</p>
+<ul>
+<li>Cutout quality on 10 fixtures, three of them white-on-white</li>
+<li>Occlusion repair measured with the repair <strong>on and off in the same run</strong>, so the comparison is between two measurements rather than against a remembered number</li>
+<li>What the AI prompts actually <em>say</em> — because model output isn't reproducible, but prompt text is</li>
+<li>Render-fidelity rejection in <strong>both</strong> directions</li>
+<li>Tag distribution across the whole catalogue</li>
+<li>Stylist bucket accuracy and per-slot determinism</li>
+<li>The mutation test described above</li>
+</ul>
+<hr>
+<h2>What I deliberately did not build</h2>
+<p>An honest boundary is more useful than an implied one.</p>
+<ul>
+<li><strong>It doesn't put clothes on you.</strong> There's a mannequin, not a body model.</li>
+<li><strong>It doesn't simulate drape.</strong> See step 8.</li>
+<li><strong>It doesn't fill in a garment's neckline.</strong> A neckline and an occlusion bite are indistinguishable at pixel level, and turning a V-neck into a boat neck is worse than leaving a notch.</li>
+<li><strong>No accounts, no sync.</strong> The wardrobe lives in one browser. That's a real limitation, not a philosophy.</li>
+<li><strong>Model behaviour isn't regression-tested.</strong> Every check costs a call and the same prompt doesn't return the same picture twice. So the prompts are tested for what they say, and each render is verified on arrival instead.</li>
+</ul>
+<hr>
+<h2>The thing I keep coming back to</h2>
+<p>Four of my five worst bugs were <em>my code lying to itself</em>: a label promoted to truth, an average over the wrong pixels, a metric measuring nothing, a test passing on zero.</p>
+<p>The AI was never the unreliable part. It did what it was asked, every time. The unreliable part was the code deciding what to ask — and, more than anything, the code deciding whether the answer was good.</p>
+<p>If you build with generative models, budget most of your effort for the verification layer. Not the prompt. The prompt is the easy half.</p>
+<hr>
+<p><strong>Live app:</strong> https://pink-petal-closet-fl3nzijd2q-uc.a.run.app <strong>Source:</strong> https://github.com/sumansikhamanjhi/pink-petal-closet</p>
+<p><em>Built with vanilla JavaScript, MediaPipe, Gemini, and Vertex AI on Google Cloud Run. No framework, no bundler, no build step, and — on the server — no dependencies at all.</em></p>
+
+</body></html>

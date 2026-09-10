@@ -27,9 +27,9 @@
 <p class="sub">An AI digital wardrobe, outfit stylist and worn-render studio</p>
 
 <p>
-<b>Version:</b> current as of 10 September 2026<br>
+<b>Version:</b> current as of 11 September 2026<br>
 <b>Type:</b> static client-side web application (no build step) + local API proxy<br>
-<b>Status:</b> working; 304 automated assertions passing across 16 validation suites
+<b>Status:</b> working; 460 automated assertions passing across 21 validation suites
 </p>
 
 <blockquote>
@@ -60,9 +60,11 @@ the rest of an outfit out of the result. A human-parsing model (MediaPipe
 selfie-multiclass) then separates clothing from body, and a marker-based
 watershed segmentation handles the case that defeats every colour-based method
 &mdash; a white garment on a white backdrop. Fabric hidden behind hair or a
-forearm is reconstructed from the surrounding weave, so a photo of a friend
-wearing a dress still yields a whole dress rather than one with a bite out of
-it. Where the automatic pass gets it wrong, a <b>Cutout Editor</b> lets you tap
+forearm is repaired <b>where the gap is enclosed by fabric</b> &mdash; a lock of
+hair lying across a chest is filled in; a bite taken out of the outer edge of a
+shoulder is deliberately left alone, because at pixel level it is
+indistinguishable from a real gap in the outfit such as the space between two
+trouser legs. Where the automatic pass gets it wrong, a <b>Cutout Editor</b> lets you tap
 the garment you want, drag a box around it, or repair the edge by hand with
 three brushes: <i>Erase</i>, <i>Draw Back</i> (which restores the photograph's
 own pixels) and <i>Fill In</i> (which invents fabric from the garment
@@ -114,9 +116,11 @@ a plain background&rdquo; has already lost, because nobody does that.</p>
 <h3>Worked examples</h3>
 
 <p><b>Digitising a garment you are already wearing.</b> You photograph a friend
-in a dress. The vision model identifies the dress and its box; the parser
-separates it from the body; the occlusion repair fills in the part an arm was
-covering. What lands in the closet is the dress, alone, on transparency &mdash;
+in a dress. The vision model identifies the dress and its box, and the parser
+separates it from the body. If an arm crosses the middle of the dress, the
+occlusion repair fills that in; if hair cuts into the outer edge of a shoulder,
+it does not, and the Cutout Editor's <i>Fill In</i> brush is there for that.
+What lands in the closet is the dress, alone, on transparency &mdash;
 usable in an outfit even though no product photo of it ever existed.</p>
 
 <p><b>Dressing for a real occasion.</b> You type &ldquo;diwali dinner&rdquo;. The
@@ -134,6 +138,7 @@ already own, see it worn, and decide.</p>
 <p>Stated because a tool's limits are part of its description:</p>
 <ul>
 <li>It does not put clothes on <b>you</b>. There is a mannequin, not a body model.</li>
+<li><b>It repairs only the occlusions that fabric encloses.</b> A bite open to the background &mdash; hair over the outer edge of a shoulder, most commonly &mdash; is left alone, because it cannot be told apart from a genuine gap in the outfit like the space between two trouser legs. Measured across five photographs of people: two repaired meaningfully (5.2% and 3.2% of garment area), 0.7% on a third, nothing on the remaining two. Painting cloth that was never there is a worse failure than leaving a notch.</li>
 <li>It does not simulate drape. Before a render, garments are shown as photographed, not warped onto a body &mdash; a wrong guess about fabric is more misleading than an honest flat lay.</li>
 <li>It does not fill in a garment's <b>neckline</b>. A neckline and an occlusion bite are indistinguishable at pixel level, and turning a V-neck into a boat neck would be worse than leaving a notch.</li>
 <li>It does not render automatically. Every render is a paid API call, so it is always a deliberate press.</li>
@@ -238,7 +243,7 @@ sole purpose is to keep the API key out of the page.</p>
   [6]  cleanup - straps, props and bare limbs read as fabric, removed
     |
     v
-  [6b] occlusion repair - fabric behind hair or a limb, put back
+  [6b] occlusion repair - fabric behind hair or a limb, where enclosed
     |
     v
   [7]  matting - soft alpha edge + colour decontamination + inpainting
@@ -309,8 +314,8 @@ looked reasonable and did not work.</p>
 
 <h2>5. Validation</h2>
 
-<p>Correctness is held by a harness, not by inspection: <b>16 headless-browser
-suites, 304 assertions</b>, run with one command and exercising the real
+<p>Correctness is held by a harness, not by inspection: <b>21 headless-browser
+suites, 460 assertions</b>, run with one command and exercising the real
 application rather than mocks.</p>
 
 <table border="1">
